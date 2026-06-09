@@ -19,16 +19,21 @@ def compact_search_debug(result: dict[str, Any], query: str) -> dict[str, Any]:
     return {
         "query": query,
         "decision": result.get("decision"),
+        "route": result.get("route"),
+        "quick_phrase": result.get("quick_phrase"),
+        "embedding_status": result.get("embedding_status"),
         "retriever_breakdown": result.get("retriever_breakdown", {}),
         "candidates_count": len(result.get("candidates", [])),
         "candidates": [
             {
                 "id": item.get("id"),
-                "source_number": item.get("number"),
+                "article_key": item.get("article_key"),
+                "section": item.get("section"),
+                "chunk_index": item.get("chunk_index"),
                 "score": item.get("score"),
                 "reranker_score": item.get("reranker_score"),
                 "lexical_signal": item.get("lexical_signal"),
-                "question": item.get("question"),
+                "title": item.get("title") or item.get("question"),
             }
             for item in result.get("candidates", [])[:3]
         ],
@@ -51,13 +56,13 @@ def answer_user_message(
     metadata: dict[str, Any] = {"classification": classification, "inbound_message_id": inbound.id}
     debug: dict[str, Any] = {"classification": classification} if debug_requested else {}
     logger.info(
-        "request_id=%s stage=classifier event=classified need_search=%s need_rewrite=%s query_type=%s intent=%s scope=%s reason=%s engine=%s",
+        "request_id=%s stage=classifier event=classified need_search=%s need_rewrite=%s query_type=%s section=%s intent=%s reason=%s engine=%s",
         request_id,
         classification.get("need_search"),
         classification.get("need_rewrite"),
         classification.get("query_type"),
+        classification.get("section"),
         classification.get("intent"),
-        classification.get("search_scope"),
         classification.get("reason"),
         classification.get("engine"),
     )
@@ -72,16 +77,21 @@ def answer_user_message(
         if not query:
             query = llm.rewrite_query(message, history, request_id=request_id) if classification.get("need_rewrite") else message
         logger.info(
-            "request_id=%s stage=pipeline event=route_selected route=rag query_len=%s intent=%s scope=%s",
+            "request_id=%s stage=pipeline event=route_selected route=rag query_len=%s intent=%s section=%s",
             request_id,
             len(query),
             classification.get("intent"),
-            classification.get("search_scope"),
+            classification.get("section"),
         )
         result = search(query, request_id=request_id, classification=classification)
         metadata["route"] = "rag"
         metadata["query"] = query
-        metadata["search"] = {"decision": result["decision"], "candidate_ids": [item.get("id") for item in result.get("candidates", [])]}
+        metadata["search"] = {
+            "decision": result["decision"],
+            "route": result.get("route"),
+            "quick_phrase": result.get("quick_phrase"),
+            "candidate_ids": [item.get("id") for item in result.get("candidates", [])],
+        }
         if debug_requested:
             debug["search"] = compact_search_debug(result, query)
         answer = (
@@ -90,9 +100,10 @@ def answer_user_message(
             else "В базе знаний не найдено достаточно информации по этому вопросу."
         )
         logger.info(
-            "request_id=%s stage=pipeline event=rag_answer_prepared decision=%s candidates=%s",
+            "request_id=%s stage=pipeline event=rag_answer_prepared decision=%s route=%s candidates=%s",
             request_id,
             result["decision"],
+            result.get("route"),
             len(result.get("candidates", [])),
         )
     outbound = ChatMessage.objects.create(user=user, role=ChatMessage.ROLE_ASSISTANT, text=answer, metadata=metadata)

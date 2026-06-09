@@ -66,7 +66,7 @@ def short_text(value: Any, limit: int = 220) -> str:
     text = " ".join(str(value or "").split())
     if len(text) <= limit:
         return text
-    return text[: limit - 1] + "…"
+    return text[: limit - 1] + "..."
 
 
 def format_classifier_debug(debug: dict[str, Any]) -> str:
@@ -77,43 +77,64 @@ def format_classifier_debug(debug: dict[str, Any]) -> str:
         f"need_search: {fmt_bool(classification.get('need_search'))}",
         f"need_rewrite: {fmt_bool(classification.get('need_rewrite'))}",
         f"query_type: {classification.get('query_type') or '-'}",
+        f"section: {classification.get('section') or classification.get('search_scope') or '-'}",
+        f"intent: {classification.get('intent') or '-'}",
+        f"confidence: {fmt_score(classification.get('confidence'))}",
         f"reason: {classification.get('reason') or '-'}",
     ]
-    engine = classification.get("engine")
-    if engine in {"fallback", "fallback_after_llm_error"}:
-        lines.extend([
-            "",
-            "Fallback-классификатор - это простой rule-based классификатор без LLM.",
-            "Он используется, когда XAI_API_KEY не задан или LLM-классификатор упал.",
-            "Он смотрит на приветствия, вопросительные маркеры и длину сообщения.",
-        ])
+    if classification.get("engine") in {"domain_rules_after_llm_error", "fallback", "fallback_after_llm_error"}:
+        lines.extend(
+            [
+                "",
+                "Fallback-классификатор: rule-based логика без LLM.",
+                "Он используется, если LLM недоступна или вернула ошибку.",
+            ]
+        )
     return "\n".join(lines)
 
 
 def format_search_debug(debug: dict[str, Any]) -> str:
     search = debug.get("search") or {}
     if search.get("skipped"):
-        return "\n".join([
-            "[debug] Поиск",
-            f"Не запускался: {search.get('reason') or 'classifier.need_search=false'}",
-        ])
+        return "\n".join(
+            [
+                "[debug] Поиск",
+                f"Не запускался: {search.get('reason') or 'classifier.need_search=false'}",
+            ]
+        )
 
     breakdown = search.get("retriever_breakdown") or {}
+    quick = search.get("quick_phrase")
+    embedding = search.get("embedding_status") or {}
     lines = [
         "[debug] Поиск",
         f"query: {short_text(search.get('query'), 260)}",
         f"decision: {search.get('decision') or '-'}",
-        f"retrievers: lexical={breakdown.get('lexical', 0)}, vector={breakdown.get('vector', 0)}",
+        f"route: {search.get('route') or '-'}",
+        f"quick_phrase_hit: {fmt_bool(bool(quick))}",
+        f"embedding: {embedding.get('status') or '-'} ({embedding.get('embedded', 0)}/{embedding.get('total', 0)})",
+        f"retrievers: quick_phrase={breakdown.get('quick_phrase', 0)}, lexical={breakdown.get('lexical', 0)}, vector={breakdown.get('vector', 0)}",
         f"candidates: {search.get('candidates_count', 0)}",
     ]
+    if quick:
+        lines.extend(
+            [
+                "",
+                f"quick phrase id={quick.get('id')} score={fmt_score(quick.get('score'))}",
+                f"phrase: {short_text(quick.get('phrase'))}",
+                f"article_key: {quick.get('article_key')}",
+            ]
+        )
     candidates = search.get("candidates") or []
     for index, item in enumerate(candidates[:3], start=1):
-        lines.extend([
-            "",
-            f"{index}. id={item.get('id')} #source_number={item.get('source_number')}",
-            f"   score={fmt_score(item.get('score'))} reranker_score={fmt_score(item.get('reranker_score'))} lexical_signal={fmt_score(item.get('lexical_signal'))}",
-            f"   question: {short_text(item.get('question'))}",
-        ])
+        lines.extend(
+            [
+                "",
+                f"{index}. id={item.get('id')} article_key={item.get('article_key')} section={item.get('section')} chunk={item.get('chunk_index')}",
+                f"   score={fmt_score(item.get('score'))} reranker_score={fmt_score(item.get('reranker_score'))} lexical_signal={fmt_score(item.get('lexical_signal'))}",
+                f"   title: {short_text(item.get('title'))}",
+            ]
+        )
     if not candidates:
         lines.append("top candidates: пусто")
     return "\n".join(lines)

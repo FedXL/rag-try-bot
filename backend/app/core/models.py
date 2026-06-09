@@ -1,6 +1,23 @@
 from django.db import models
 
 
+SECTION_CHOICES = [
+    ("catalog", "Каталог"),
+    ("help", "Помощь"),
+    ("about", "О магазине"),
+    ("inspiration", "Вдохновение"),
+    ("color_selection", "Подбор цвета"),
+    ("partners", "Партнерам"),
+    ("glossary", "Глоссарий"),
+    ("contacts", "Контакты"),
+    ("news_articles", "Новости и статьи"),
+    ("mixed", "Смешанный"),
+    ("none", "Нет"),
+]
+
+SECTION_VALUES = {value for value, _ in SECTION_CHOICES}
+
+
 class QAItem(models.Model):
     source_number = models.IntegerField(unique=True, db_index=True)
     question_ru = models.TextField()
@@ -13,6 +30,51 @@ class QAItem(models.Model):
 
     def __str__(self):
         return f"#{self.source_number}: {self.question_ru[:80]}"
+
+
+class ArticleChunk(models.Model):
+    article_key = models.CharField(max_length=255, db_index=True)
+    section = models.CharField(max_length=64, choices=SECTION_CHOICES, db_index=True)
+    source_url = models.URLField(blank=True, default="")
+    title = models.CharField(max_length=500, blank=True, default="")
+    chunk_index = models.IntegerField(default=0)
+    chunk_text = models.TextField()
+    normalized_text = models.TextField(blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["section", "article_key", "chunk_index"]
+        constraints = [
+            models.UniqueConstraint(fields=["article_key", "chunk_index"], name="unique_article_chunk"),
+        ]
+
+    def __str__(self):
+        return f"{self.section}/{self.article_key}#{self.chunk_index}: {self.title[:80]}"
+
+
+class QuickPhrase(models.Model):
+    phrase = models.TextField()
+    normalized_phrase = models.TextField(db_index=True)
+    section = models.CharField(max_length=64, choices=SECTION_CHOICES, db_index=True)
+    article_key = models.CharField(max_length=255, db_index=True)
+    target_chunk_index = models.IntegerField(null=True, blank=True)
+    priority = models.IntegerField(default=100, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["priority", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["normalized_phrase", "section", "article_key"], name="unique_quick_phrase_route"),
+        ]
+
+    def __str__(self):
+        return f"{self.section}: {self.phrase[:100]}"
 
 
 class SearchThresholdProfile(models.Model):

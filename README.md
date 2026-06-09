@@ -1,62 +1,66 @@
 # Telegram RAG Bot
 
-Русскоязычный Telegram RAG-бот на Django, Celery, Postgres/pgvector и отдельном FastAPI ML-сервисе.
+Русскоязычный Telegram RAG-бот на Django, aiogram, Celery, Postgres/pgvector и отдельном FastAPI ML-сервисе.
 
 ## Архитектура
 
 - `bot` - aiogram polling-бот. Принимает сообщения Telegram и отправляет их во внутренний Django API.
-- `nginx` - внешняя точка входа на порту `9001`, проксирует Django и раздает `/static/`.
-- `web` - Django/DRF backend и Django Admin. Слушает `9001` только внутри Docker-сети.
+- `web` - Django/DRF backend и Django Admin.
+- `nginx` - внешняя точка входа на порт `9001`, проксирует Django и раздает `/static/`.
 - `celery` - worker для фоновых задач, включая построение эмбеддингов.
 - `beat` - Celery Beat.
-- `ml-api` - FastAPI-сервис для ML-задач. Держит embedding/reranker модели в памяти и считает на GPU при `ML_DEVICE=cuda`.
-- `db` - Postgres с расширением pgvector. Используется и как основная БД, и как векторное хранилище.
+- `ml-api` - FastAPI-сервис для embedding/rerank моделей. Модели держатся в памяти процесса.
+- `db` - Postgres с `pgvector` и `pg_trgm`. Используется как основная БД и векторное хранилище.
 - `redis` - broker/result backend для Celery.
+
+## База знаний
+
+База знаний разделена на две основные таблицы:
+
+- `QuickPhrase` - быстрые фразы/вопросы пользователя. Они не чанкуются и не эмбеддятся. Каждая фраза ведет на `article_key`.
+- `ArticleChunk` - чанки статей, страниц и каталога. В этой же таблице хранится колонка `embedding vector`.
+
+Старые `QAItem` не удалены для совместимости. Команда `sync_initial_knowledge` переносит их в `ArticleChunk(section=catalog)`.
 
 ## Pipeline запроса
 
 1. Пользователь пишет сообщение в Telegram.
 2. `bot` отправляет запрос в `web` на `/api/chat/`.
 3. Django сохраняет пользователя и входящее сообщение.
-4. Классификатор решает, нужен ли поиск по базе знаний.
-5. Если поиск не нужен, Django отвечает напрямую через LLM или fallback-логику.
-6. Если поиск нужен, Django ищет кандидатов в Postgres:
+4. Классификатор делает два шага:
+   - решает, нужен ли поиск в базе знаний;
+   - выбирает раздел: `catalog`, `help`, `about`, `inspiration`, `color_selection`, `partners`, `glossary`, `contacts`, `news_articles`, `mixed`, `none`.
+5. Если поиск не нужен, ответ формируется напрямую.
+6. Если поиск нужен, Django сначала ищет в `QuickPhrase`.
+7. Если быстрая фраза найдена, берется связанный `ArticleChunk`.
+8. Если быстрой фразы нет, Django ищет по `ArticleChunk`:
    - lexical search через `pg_trgm`;
-   - vector search через `pgvector`, если эмбеддинги уже построены.
-7. Django отправляет кандидатов в `ml-api` для rerank.
-8. LLM формирует ответ только по найденному контексту.
-9. Ответ сохраняется в истории и отправляется пользователю.
-
-## Требования
-
-- Docker и Docker Compose.
-- Для GPU-режима: NVIDIA driver, NVIDIA Container Toolkit и Docker с поддержкой `--gpus all`.
-- Для CPU-режима можно поставить `ML_DEVICE=cpu`, но обработка будет медленнее.
-
-Проверка GPU внутри Docker:
-
-```bash
-docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
-```
+   - vector search через `pgvector`, если индекс готов.
+9. Кандидаты отправляются в `ml-api` на rerank.
+10. LLM формирует ответ только по найденному контексту.
+11. Ответ сохраняется в истории и отправляется пользователю.
 
 ## Настройка
-
-Создайте `.env` из примера:
 
 ```bash
 cp .env.example .env
 ```
 
-Заполните обязательные переменные:
+Обязательные переменные:
 
 - `TELEGRAM_BOT_TOKEN`
 - `DJANGO_SECRET_KEY`
 - `POSTGRES_PASSWORD`
 - `DATABASE_URL`
 - `INTERNAL_API_TOKEN`
-- `XAI_API_KEY`, если нужен внешний LLM для классификации и генерации
+- `XAI_API_KEY`, если нужен LLM-классификатор и генерация ответов
 
-Без `XAI_API_KEY` бот продолжит работать, но будет использовать fallback-классификатор и ответы только из найденных записей базы знаний.
+Админ создается через:
+
+```text
+DJANGO_SUPERUSER_USERNAME=admin
+DJANGO_SUPERUSER_PASSWORD=admin
+```
 
 ## Запуск
 
@@ -68,43 +72,35 @@ docker compose up -d --build
 
 ```bash
 docker compose ps
-curl http://127.0.0.1:22972/api/health/
-docker exec telegram-rag-bot-ml-api-1 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu')"
+curl http://127.0.0.1:9001/api/health/
 ```
 
-Админка при прямом доступе к серверному порту:
+Админка:
 
 ```text
 http://SERVER_IP:9001/admin/
 ```
 
-Если провайдер пробрасывает внешний порт на внутренний `9001`, используйте внешний порт провайдера. Например: `PUBLIC_IP:22972 -> server:9001`.
+Если провайдер пробрасывает внешний порт на серверный `9001`, используйте внешний порт провайдера. Например: `PUBLIC_IP:22972 -> server:9001`.
 
-Логин и пароль задаются переменными:
+## Индексация
 
-```text
-DJANGO_SUPERUSER_USERNAME
-DJANGO_SUPERUSER_PASSWORD
-```
-
-## Работа с базой знаний
-
-В Django Admin добавьте записи `QAItem`:
-
-- `source_number` - уникальный номер записи;
-- `question_ru` - вопрос на русском;
-- `answer_ru` - ответ на русском.
-
-После добавления данных запустите построение эмбеддингов:
+Начальные данные и legacy `QAItem` синхронизируются командой:
 
 ```bash
-curl -X POST http://127.0.0.1:22972/api/index/prepare/
+docker compose exec web python manage.py sync_initial_knowledge
 ```
 
-Статус можно смотреть через:
+Построение эмбеддингов для `ArticleChunk`:
 
 ```bash
-curl http://127.0.0.1:22972/api/health/
+curl -X POST http://127.0.0.1:9001/api/index/prepare/
+```
+
+Статус:
+
+```bash
+curl http://127.0.0.1:9001/api/health/
 ```
 
 ## API
@@ -114,17 +110,17 @@ curl http://127.0.0.1:22972/api/health/
 - `POST /api/search/` - ручной поиск по базе знаний.
 - `POST /api/index/prepare/` - запуск построения эмбеддингов.
 - `GET /api/tasks/<task_id>/` - статус Celery-задачи.
-- `GET /api/questions/` - список вопросов.
+- `GET /api/questions/` - legacy список `QAItem`.
 
 ## Логи
 
-Запрос от Telegram до ответа размечается единым `request_id`.
+Запрос размечается единым `request_id`.
 
 ```bash
 docker compose logs -f bot web celery ml-api
 ```
 
-В логах видны этапы:
+Ключевые стадии:
 
 ```text
 stage=telegram->bot event=message_received
@@ -132,10 +128,10 @@ stage=bot->django event=chat_post
 stage=bot->django event=chat_received
 stage=classifier event=classified
 stage=pipeline event=route_selected
-stage=search event=start
+stage=search event=quick_phrase_hit
+stage=search event=article_lexical_done
+stage=search event=article_vector_done
 stage=django->ml-api event=request
-stage=ml-api event=embed_start
-stage=ml-api event=rerank_done
 stage=pipeline event=done
 stage=bot->telegram event=answer_sent
 ```
