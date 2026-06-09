@@ -5,7 +5,8 @@
 ## Архитектура
 
 - `bot` - aiogram polling-бот. Принимает сообщения Telegram и отправляет их во внутренний Django API.
-- `web` - Django/DRF backend и Django Admin. Наружу публикуется порт `22972 -> 9001`.
+- `nginx` - внешняя точка входа на порту `9001`, проксирует Django и раздает `/static/`.
+- `web` - Django/DRF backend и Django Admin. Слушает `9001` только внутри Docker-сети.
 - `celery` - worker для фоновых задач, включая построение эмбеддингов.
 - `beat` - Celery Beat.
 - `ml-api` - FastAPI-сервис для ML-задач. Держит embedding/reranker модели в памяти и считает на GPU при `ML_DEVICE=cuda`.
@@ -71,11 +72,13 @@ curl http://127.0.0.1:22972/api/health/
 docker exec telegram-rag-bot-ml-api-1 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu')"
 ```
 
-Админка:
+Админка при прямом доступе к серверному порту:
 
 ```text
-http://SERVER_IP:22972/admin/
+http://SERVER_IP:9001/admin/
 ```
+
+Если провайдер пробрасывает внешний порт на внутренний `9001`, используйте внешний порт провайдера. Например: `PUBLIC_IP:22972 -> server:9001`.
 
 Логин и пароль задаются переменными:
 
