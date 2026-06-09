@@ -1,0 +1,96 @@
+services:
+  db:
+    image: pgvector/pgvector:pg15
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ragbot_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.app
+    env_file: .env
+    command: ["sh", "/app/entrypoint-web.sh"]
+    ports:
+      - "22972:9001"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      ml-api:
+        condition: service_started
+    restart: unless-stopped
+
+  celery:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.app
+    env_file: .env
+    command: ["celery", "-A", "app.celery_app", "worker", "-Q", "default", "--loglevel=INFO"]
+    depends_on:
+      web:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.app
+    env_file: .env
+    command: ["celery", "-A", "app.celery_app", "beat", "--loglevel=INFO"]
+    depends_on:
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ml-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.ml-api
+    env_file: .env
+    command: ["uvicorn", "ml_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    gpus: all
+    volumes:
+      - ragbot_hf_cache:/models/huggingface
+    environment:
+      HF_HOME: /models/huggingface
+      OMP_NUM_THREADS: "12"
+      MKL_NUM_THREADS: "12"
+      TOKENIZERS_PARALLELISM: "false"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.app
+    env_file: .env
+    command: ["python", "-m", "bot.main"]
+    depends_on:
+      web:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  ragbot_pgdata:
+  ragbot_hf_cache:
