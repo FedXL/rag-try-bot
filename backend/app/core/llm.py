@@ -7,6 +7,8 @@ from typing import Any
 
 from openai import OpenAI
 
+from .classifier import classify_rule
+
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
 XAI_BASE_URL = os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1")
 XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4.3")
@@ -42,58 +44,26 @@ def parse_json(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-def rule_classify(message: str, engine: str = "fallback", reason_suffix: str = "") -> dict[str, Any]:
-    lowered = message.lower().strip()
-    if lowered in {"/start", "привет", "здравствуйте", "добрый день"}:
-        return {
-            "need_search": False,
-            "need_rewrite": False,
-            "query_type": "greeting",
-            "reason": f"приветствие{reason_suffix}",
-            "engine": engine,
-        }
-    markers = [
-        "я хочу",
-        "мне нужно",
-        "как",
-        "что",
-        "почему",
-        "сколько",
-        "где",
-        "когда",
-        "какой",
-        "какая",
-        "какие",
-        "можно",
-        "нужно ли",
-        "как сделать",
-    ]
-    need_search = any(marker in lowered for marker in markers) or len(lowered.split()) >= 4
-    return {
-        "need_search": need_search,
-        "need_rewrite": False,
-        "query_type": "knowledge_base" if need_search else "general_chat",
-        "reason": f"правило fallback{reason_suffix}",
-        "engine": engine,
-    }
-
-
 def classify_message(message: str, history: list[dict[str, str]], request_id: str = "-") -> dict[str, Any]:
     started = perf_counter()
-    if not has_llm():
-        result = rule_classify(message, engine="fallback")
+    rule_result = classify_rule(message, history, engine="domain_rules")
+    if not has_llm() or float(rule_result.get("confidence", 0)) >= 0.7:
         logger.info(
-            "request_id=%s stage=classifier event=fallback_result need_search=%s query_type=%s duration_ms=%s",
+            "request_id=%s stage=classifier event=rule_result need_search=%s query_type=%s intent=%s scope=%s confidence=%s duration_ms=%s",
             request_id,
-            result["need_search"],
-            result["query_type"],
+            rule_result.get("need_search"),
+            rule_result.get("query_type"),
+            rule_result.get("intent"),
+            rule_result.get("search_scope"),
+            rule_result.get("confidence"),
             round((perf_counter() - started) * 1000),
         )
-        return result
+        return rule_result
+
     history_text = "\n".join(f"{item['role']}: {item['content']}" for item in history[-6:])
     prompt = f"""
-Ты классификатор сообщений Telegram RAG-бота. Отвечай только на русском.
-Реши, нужно ли искать ответ в базе знаний.
+Ты классификатор сообщений Telegram RAG-бота магазина лакокрасочных материалов "Центр красок".
+Реши, нужно ли искать ответ в базе знаний, и выбери доменный интент.
 
 История:
 {history_text or "(пусто)"}
@@ -102,7 +72,16 @@ def classify_message(message: str, history: list[dict[str, str]], request_id: st
 {message}
 
 Верни только JSON:
-{{"need_search": true, "need_rewrite": true, "query_type": "knowledge_base | general_chat | greeting | unclear", "reason": "короткая причина"}}
+{{
+  "need_search": true,
+  "need_rewrite": false,
+  "query_type": "knowledge_base | general_chat | greeting | unclear",
+  "intent": "general_offer | product_lookup | product_recommendation | category_browse | tinting | delivery | contacts | order | brands | partners | greeting | offtopic | unclear",
+  "search_scope": "guides | products | service | mixed | none",
+  "slots": {{"category": "", "brand": "", "surface": "", "room": "", "finish": "", "color": "", "volume": ""}},
+  "rewritten_query": "самостоятельный поисковый запрос",
+  "reason": "короткая причина"
+}}
 """
     try:
         logger.info("request_id=%s stage=classifier event=llm_request model=%s history=%s", request_id, XAI_MODEL, len(history))
@@ -114,20 +93,28 @@ def classify_message(message: str, history: list[dict[str, str]], request_id: st
             "need_search": bool(result.get("need_search")),
             "need_rewrite": bool(result.get("need_rewrite")),
             "query_type": str(result.get("query_type") or "unclear"),
+            "intent": str(result.get("intent") or rule_result.get("intent") or "unclear"),
+            "search_scope": str(result.get("search_scope") or rule_result.get("search_scope") or "mixed"),
+            "slots": result.get("slots") if isinstance(result.get("slots"), dict) else rule_result.get("slots", {}),
+            "rewritten_query": str(result.get("rewritten_query") or rule_result.get("rewritten_query") or message),
+            "confidence": float(result.get("confidence") or 0.65),
             "reason": str(result.get("reason") or ""),
             "engine": "llm",
         }
         logger.info(
-            "request_id=%s stage=classifier event=llm_result need_search=%s need_rewrite=%s query_type=%s duration_ms=%s",
+            "request_id=%s stage=classifier event=llm_result need_search=%s need_rewrite=%s query_type=%s intent=%s scope=%s duration_ms=%s",
             request_id,
             classified["need_search"],
             classified["need_rewrite"],
             classified["query_type"],
+            classified["intent"],
+            classified["search_scope"],
             round((perf_counter() - started) * 1000),
         )
         return classified
     except Exception as exc:
-        fallback = rule_classify(message, engine="fallback_after_llm_error", reason_suffix=f"; LLM classifier failed: {exc}")
+        fallback = classify_rule(message, history, engine="domain_rules_after_llm_error")
+        fallback["reason"] += f"; LLM classifier failed: {exc}"
         logger.exception("request_id=%s stage=classifier event=llm_failed fallback=%s error=%s", request_id, fallback, exc)
         return fallback
 

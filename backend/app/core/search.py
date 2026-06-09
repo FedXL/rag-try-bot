@@ -31,6 +31,26 @@ STOPWORDS = {
     "для",
 }
 
+GUIDE_SOURCE_NUMBER_MIN = 199000
+
+
+def is_guide_or_service(item: dict[str, Any]) -> bool:
+    return int(item.get("number") or 0) >= GUIDE_SOURCE_NUMBER_MIN
+
+
+def scope_boost(item: dict[str, Any], classification: dict[str, Any] | None) -> float:
+    if not classification:
+        return 0.0
+    scope = classification.get("search_scope")
+    intent = classification.get("intent")
+    if scope in {"guides", "service"}:
+        return 2.0 if is_guide_or_service(item) else -0.35
+    if scope == "products":
+        return 0.5 if not is_guide_or_service(item) else -0.25
+    if intent == "product_recommendation":
+        return 0.2 if not is_guide_or_service(item) else 0.15
+    return 0.0
+
 
 def ensure_profile() -> SearchThresholdProfile:
     profile, _ = SearchThresholdProfile.objects.get_or_create(name="default", defaults={"active": True})
@@ -180,7 +200,12 @@ def vector_search(phrase: str, request_id: str = "-") -> list[dict[str, Any]]:
     return result
 
 
-def merge(phrase: str, groups: list[list[dict[str, Any]]], request_id: str = "-") -> list[dict[str, Any]]:
+def merge(
+    phrase: str,
+    groups: list[list[dict[str, Any]]],
+    request_id: str = "-",
+    classification: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     merged: dict[int, dict[str, Any]] = {}
     for group in groups:
         for rank, item in enumerate(group, start=1):
@@ -188,21 +213,33 @@ def merge(phrase: str, groups: list[list[dict[str, Any]]], request_id: str = "-"
             row["retrievers"][item["source"]] = {"rank": rank, "score": item["score"]}
             row["rrf"] += 1 / (60 + rank)
             row["lexical_signal"] = max(float(row.get("score", 0)), overlap(phrase, row.get("question", "")))
-    result = sorted(merged.values(), key=lambda x: x["rrf"], reverse=True)
+    for row in merged.values():
+        row["domain_boost"] = scope_boost(row, classification)
+    result = sorted(merged.values(), key=lambda x: (x["rrf"] + x.get("domain_boost", 0)), reverse=True)
     logger.info("request_id=%s stage=search event=merge_done candidates=%s", request_id, len(result))
     return result
 
 
-def search(phrase: str, request_id: str = "-") -> dict[str, Any]:
+def search(phrase: str, request_id: str = "-", classification: dict[str, Any] | None = None) -> dict[str, Any]:
     started = perf_counter()
-    logger.info("request_id=%s stage=search event=start query_len=%s", request_id, len(phrase))
+    logger.info(
+        "request_id=%s stage=search event=start query_len=%s intent=%s scope=%s",
+        request_id,
+        len(phrase),
+        (classification or {}).get("intent"),
+        (classification or {}).get("search_scope"),
+    )
     profile = ensure_profile()
     lexical = lexical_search(phrase, request_id=request_id)
     vector = vector_search(phrase, request_id=request_id)
-    candidates = merge(phrase, [vector, lexical], request_id=request_id)
+    candidates = merge(phrase, [vector, lexical], request_id=request_id, classification=classification)
     ranked = rerank(phrase, candidates[:20], request_id=request_id) if candidates else []
+    for item in ranked:
+        item["domain_boost"] = scope_boost(item, classification)
+        item["final_score"] = float(item.get("reranker_score", item.get("score", 0)) or 0) + float(item.get("domain_boost", 0))
+    ranked = sorted(ranked, key=lambda item: item.get("final_score", 0), reverse=True)
     top = ranked[0] if ranked else None
-    score = float(top.get("reranker_score", top.get("score", 0))) if top else 0.0
+    score = float(top.get("final_score", top.get("reranker_score", top.get("score", 0)))) if top else 0.0
     lexical_signal = float(top.get("lexical_signal", 0)) if top else 0.0
     decision = "FOUND" if top and (score >= profile.found_threshold or lexical_signal >= profile.min_lexical_score) else "NOT_FOUND"
     logger.info(

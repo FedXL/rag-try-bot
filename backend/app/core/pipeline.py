@@ -51,11 +51,13 @@ def answer_user_message(
     metadata: dict[str, Any] = {"classification": classification, "inbound_message_id": inbound.id}
     debug: dict[str, Any] = {"classification": classification} if debug_requested else {}
     logger.info(
-        "request_id=%s stage=classifier event=classified need_search=%s need_rewrite=%s query_type=%s reason=%s engine=%s",
+        "request_id=%s stage=classifier event=classified need_search=%s need_rewrite=%s query_type=%s intent=%s scope=%s reason=%s engine=%s",
         request_id,
         classification.get("need_search"),
         classification.get("need_rewrite"),
         classification.get("query_type"),
+        classification.get("intent"),
+        classification.get("search_scope"),
         classification.get("reason"),
         classification.get("engine"),
     )
@@ -66,9 +68,17 @@ def answer_user_message(
             debug["search"] = {"skipped": True, "reason": "classifier.need_search=false"}
         logger.info("request_id=%s stage=pipeline event=route_selected route=direct", request_id)
     else:
-        query = llm.rewrite_query(message, history, request_id=request_id) if classification.get("need_rewrite") else message
-        logger.info("request_id=%s stage=pipeline event=route_selected route=rag query_len=%s", request_id, len(query))
-        result = search(query, request_id=request_id)
+        query = str(classification.get("rewritten_query") or "").strip()
+        if not query:
+            query = llm.rewrite_query(message, history, request_id=request_id) if classification.get("need_rewrite") else message
+        logger.info(
+            "request_id=%s stage=pipeline event=route_selected route=rag query_len=%s intent=%s scope=%s",
+            request_id,
+            len(query),
+            classification.get("intent"),
+            classification.get("search_scope"),
+        )
+        result = search(query, request_id=request_id, classification=classification)
         metadata["route"] = "rag"
         metadata["query"] = query
         metadata["search"] = {"decision": result["decision"], "candidate_ids": [item.get("id") for item in result.get("candidates", [])]}
