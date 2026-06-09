@@ -1,4 +1,6 @@
+import logging
 import re
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -8,6 +10,8 @@ from django.db import connection
 from django.db.models import Count, Q
 
 from .models import EmbeddingRun, QAItem, SearchThresholdProfile
+
+logger = logging.getLogger(__name__)
 
 TOP_K = 5
 RETRIEVER_TOP_K = 20
@@ -55,21 +59,38 @@ def vector_literal(vector: list[float]) -> str:
     return "[" + ",".join(f"{value:.8f}" for value in vector) + "]"
 
 
-def ml_post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+def ml_post(path: str, payload: dict[str, Any], request_id: str = "-") -> dict[str, Any]:
+    started = perf_counter()
+    logger.info(
+        "request_id=%s stage=django->ml-api event=request path=%s payload_keys=%s",
+        request_id,
+        path,
+        ",".join(sorted(payload.keys())),
+    )
     with httpx.Client(timeout=settings.ML_API_TIMEOUT) as client:
-        response = client.post(f"{settings.ML_API_URL}{path}", json=payload)
+        response = client.post(f"{settings.ML_API_URL}{path}", json=payload, headers={"X-Request-ID": request_id})
         response.raise_for_status()
+        logger.info(
+            "request_id=%s stage=ml-api->django event=response path=%s status=%s duration_ms=%s",
+            request_id,
+            path,
+            response.status_code,
+            round((perf_counter() - started) * 1000),
+        )
         return response.json()
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    return ml_post("/embed", {"texts": texts})["vectors"]
+def embed_texts(texts: list[str], request_id: str = "-") -> list[list[float]]:
+    logger.info("request_id=%s stage=search event=embed_texts count=%s", request_id, len(texts))
+    return ml_post("/embed", {"texts": texts}, request_id=request_id)["vectors"]
 
 
-def rerank(query: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def rerank(query: str, candidates: list[dict[str, Any]], request_id: str = "-") -> list[dict[str, Any]]:
     if not candidates:
+        logger.info("request_id=%s stage=search event=rerank_skipped candidates=0", request_id)
         return []
-    return ml_post("/rerank", {"query": query, "candidates": candidates})["candidates"]
+    logger.info("request_id=%s stage=search event=rerank_start candidates=%s", request_id, len(candidates))
+    return ml_post("/rerank", {"query": query, "candidates": candidates}, request_id=request_id)["candidates"]
 
 
 def tokenize(text: str) -> set[str]:
@@ -83,7 +104,8 @@ def overlap(query: str, candidate: str) -> float:
     return len(q & tokenize(candidate)) / len(q)
 
 
-def lexical_search(phrase: str) -> list[dict[str, Any]]:
+def lexical_search(phrase: str, request_id: str = "-") -> list[dict[str, Any]]:
+    started = perf_counter()
     ensure_pg()
     with connection.cursor() as cursor:
         cursor.execute(
@@ -97,7 +119,7 @@ def lexical_search(phrase: str) -> list[dict[str, Any]]:
         )
         cols = [col[0] for col in cursor.description]
         rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
-    return [
+    result = [
         {
             "id": row["id"],
             "number": row["source_number"],
@@ -108,13 +130,22 @@ def lexical_search(phrase: str) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+    logger.info(
+        "request_id=%s stage=search event=lexical_done candidates=%s duration_ms=%s",
+        request_id,
+        len(result),
+        round((perf_counter() - started) * 1000),
+    )
+    return result
 
 
-def vector_search(phrase: str) -> list[dict[str, Any]]:
+def vector_search(phrase: str, request_id: str = "-") -> list[dict[str, Any]]:
+    started = perf_counter()
     ensure_pg()
     if not EmbeddingRun.objects.filter(engine="pgvector", status="ready").exists():
+        logger.info("request_id=%s stage=search event=vector_skipped reason=index_not_ready", request_id)
         return []
-    vector = embed_texts([phrase])[0]
+    vector = embed_texts([phrase], request_id=request_id)[0]
     with connection.cursor() as cursor:
         cursor.execute(
             """
@@ -129,7 +160,7 @@ def vector_search(phrase: str) -> list[dict[str, Any]]:
         )
         cols = [col[0] for col in cursor.description]
         rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
-    return [
+    result = [
         {
             "id": row["id"],
             "number": row["source_number"],
@@ -140,9 +171,16 @@ def vector_search(phrase: str) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+    logger.info(
+        "request_id=%s stage=search event=vector_done candidates=%s duration_ms=%s",
+        request_id,
+        len(result),
+        round((perf_counter() - started) * 1000),
+    )
+    return result
 
 
-def merge(phrase: str, groups: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+def merge(phrase: str, groups: list[list[dict[str, Any]]], request_id: str = "-") -> list[dict[str, Any]]:
     merged: dict[int, dict[str, Any]] = {}
     for group in groups:
         for rank, item in enumerate(group, start=1):
@@ -150,19 +188,35 @@ def merge(phrase: str, groups: list[list[dict[str, Any]]]) -> list[dict[str, Any
             row["retrievers"][item["source"]] = {"rank": rank, "score": item["score"]}
             row["rrf"] += 1 / (60 + rank)
             row["lexical_signal"] = max(float(row.get("score", 0)), overlap(phrase, row.get("question", "")))
-    return sorted(merged.values(), key=lambda x: x["rrf"], reverse=True)
+    result = sorted(merged.values(), key=lambda x: x["rrf"], reverse=True)
+    logger.info("request_id=%s stage=search event=merge_done candidates=%s", request_id, len(result))
+    return result
 
 
-def search(phrase: str) -> dict[str, Any]:
+def search(phrase: str, request_id: str = "-") -> dict[str, Any]:
+    started = perf_counter()
+    logger.info("request_id=%s stage=search event=start query_len=%s", request_id, len(phrase))
     profile = ensure_profile()
-    lexical = lexical_search(phrase)
-    vector = vector_search(phrase)
-    candidates = merge(phrase, [vector, lexical])
-    ranked = rerank(phrase, candidates[:20]) if candidates else []
+    lexical = lexical_search(phrase, request_id=request_id)
+    vector = vector_search(phrase, request_id=request_id)
+    candidates = merge(phrase, [vector, lexical], request_id=request_id)
+    ranked = rerank(phrase, candidates[:20], request_id=request_id) if candidates else []
     top = ranked[0] if ranked else None
     score = float(top.get("reranker_score", top.get("score", 0))) if top else 0.0
     lexical_signal = float(top.get("lexical_signal", 0)) if top else 0.0
     decision = "FOUND" if top and (score >= profile.found_threshold or lexical_signal >= profile.min_lexical_score) else "NOT_FOUND"
+    logger.info(
+        "request_id=%s stage=search event=done decision=%s lexical=%s vector=%s ranked=%s top_id=%s score=%.4f lexical_signal=%.4f duration_ms=%s",
+        request_id,
+        decision,
+        len(lexical),
+        len(vector),
+        len(ranked),
+        top.get("id") if top else None,
+        score,
+        lexical_signal,
+        round((perf_counter() - started) * 1000),
+    )
     return {
         "message": phrase,
         "decision": decision,

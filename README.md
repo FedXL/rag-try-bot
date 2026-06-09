@@ -113,6 +113,30 @@ curl http://127.0.0.1:22972/api/health/
 - `GET /api/tasks/<task_id>/` - статус Celery-задачи.
 - `GET /api/questions/` - список вопросов.
 
+## Логи
+
+Запрос от Telegram до ответа размечается единым `request_id`.
+
+```bash
+docker compose logs -f bot web celery ml-api
+```
+
+В логах видны этапы:
+
+```text
+stage=telegram->bot event=message_received
+stage=bot->django event=chat_post
+stage=bot->django event=chat_received
+stage=classifier event=classified
+stage=pipeline event=route_selected
+stage=search event=start
+stage=django->ml-api event=request
+stage=ml-api event=embed_start
+stage=ml-api event=rerank_done
+stage=pipeline event=done
+stage=bot->telegram event=answer_sent
+```
+
 ## Безопасность
 
 Не коммитьте `.env`. В репозитории должен лежать только `.env.example`.

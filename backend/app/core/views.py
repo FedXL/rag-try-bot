@@ -1,13 +1,16 @@
+import logging
+
 from celery.result import AsyncResult
 from django.conf import settings
-from django.http import HttpRequest, HttpResponse, JsonResponse
-from django.views.decorators.csrf import csrf_exempt
+from django.http import HttpRequest, HttpResponse
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .models import QAItem, TelegramUser
 from .pipeline import answer_user_message
 from .search import health as health_data, prepare_async, search as search_service
+
+logger = logging.getLogger(__name__)
 
 
 def index(request: HttpRequest) -> HttpResponse:
@@ -26,28 +29,52 @@ def internal_allowed(request) -> bool:
 
 @api_view(["POST"])
 def chat(request):
+    request_id = str(request.data.get("request_id") or request.headers.get("X-Request-ID") or "-")
     if not internal_allowed(request):
+        logger.warning("request_id=%s stage=django event=chat_forbidden", request_id)
         return Response({"error": "forbidden"}, status=403)
     message = str(request.data.get("message") or "").strip()
     if not message:
+        logger.info("request_id=%s stage=django event=chat_rejected reason=empty_message", request_id)
         return Response({"error": "message is required"}, status=400)
+    logger.info(
+        "request_id=%s stage=bot->django event=chat_received telegram_id=%s message_id=%s text_len=%s",
+        request_id,
+        request.data.get("telegram_id"),
+        request.data.get("telegram_message_id"),
+        len(message),
+    )
     user, _ = TelegramUser.objects.update_or_create(
         telegram_id=int(request.data.get("telegram_id") or 0),
-        defaults={"username": str(request.data.get("username") or ""), "first_name": str(request.data.get("first_name") or ""), "last_name": str(request.data.get("last_name") or "")},
+        defaults={
+            "username": str(request.data.get("username") or ""),
+            "first_name": str(request.data.get("first_name") or ""),
+            "last_name": str(request.data.get("last_name") or ""),
+        },
     )
-    return Response(answer_user_message(user, message, request.data.get("telegram_message_id")))
+    result = answer_user_message(user, message, request.data.get("telegram_message_id"), request_id=request_id)
+    logger.info(
+        "request_id=%s stage=django->bot event=chat_done route=%s answer_len=%s",
+        request_id,
+        result.get("metadata", {}).get("route"),
+        len(str(result.get("answer") or "")),
+    )
+    return Response(result)
 
 
 @api_view(["POST"])
 def search(request):
+    request_id = str(request.data.get("request_id") or request.headers.get("X-Request-ID") or "-")
     phrase = str(request.data.get("query") or request.data.get("message") or "").strip()
     if not phrase:
         return Response({"error": "query is required"}, status=400)
-    return Response(search_service(phrase))
+    logger.info("request_id=%s stage=django event=manual_search query_len=%s", request_id, len(phrase))
+    return Response(search_service(phrase, request_id=request_id))
 
 
 @api_view(["POST"])
 def prepare_index(request):
+    logger.info("request_id=- stage=django event=prepare_index_requested")
     task = prepare_async()
     return Response({"task_id": task.id, "state": task.state})
 
@@ -70,4 +97,14 @@ def questions(request):
     qs = QAItem.objects.all().order_by("source_number")
     if q:
         qs = qs.filter(question_ru__icontains=q)
-    return Response({"items": [{"id": item.id, "source_number": item.source_number, "question_ru": item.question_ru, "answer_ru": item.answer_ru} for item in qs[:100]]})
+    return Response({
+        "items": [
+            {
+                "id": item.id,
+                "source_number": item.source_number,
+                "question_ru": item.question_ru,
+                "answer_ru": item.answer_ru,
+            }
+            for item in qs[:100]
+        ]
+    })

@@ -64,3 +64,30 @@ CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6
 INTERNAL_API_TOKEN = os.environ.get("INTERNAL_API_TOKEN", "")
 ML_API_URL = os.environ.get("ML_API_URL", "http://ml-api:8000")
 ML_API_TIMEOUT = int(os.environ.get("ML_API_TIMEOUT", "600"))
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "plain": {
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "plain",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": os.environ.get("LOG_LEVEL", "INFO"),
+    },
+    "loggers": {
+        "django.server": {
+            "handlers": ["console"],
+            "level": os.environ.get("LOG_LEVEL", "INFO"),
+            "propagate": False,
+        },
+    },
+}
