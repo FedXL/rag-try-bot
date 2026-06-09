@@ -13,6 +13,14 @@ from .search import health as health_data, prepare_async, search as search_servi
 logger = logging.getLogger(__name__)
 
 
+def truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def index(request: HttpRequest) -> HttpResponse:
     return HttpResponse("Telegram RAG bot backend. Admin: /admin/")
 
@@ -52,7 +60,13 @@ def chat(request):
             "last_name": str(request.data.get("last_name") or ""),
         },
     )
-    result = answer_user_message(user, message, request.data.get("telegram_message_id"), request_id=request_id)
+    result = answer_user_message(
+        user,
+        message,
+        request.data.get("telegram_message_id"),
+        request_id=request_id,
+        debug_requested=truthy(request.data.get("debug")),
+    )
     logger.info(
         "request_id=%s stage=django->bot event=chat_done route=%s answer_len=%s",
         request_id,

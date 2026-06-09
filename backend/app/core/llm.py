@@ -42,10 +42,16 @@ def parse_json(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-def rule_classify(message: str) -> dict[str, Any]:
+def rule_classify(message: str, engine: str = "fallback", reason_suffix: str = "") -> dict[str, Any]:
     lowered = message.lower().strip()
     if lowered in {"/start", "привет", "здравствуйте", "добрый день"}:
-        return {"need_search": False, "need_rewrite": False, "query_type": "greeting", "reason": "приветствие"}
+        return {
+            "need_search": False,
+            "need_rewrite": False,
+            "query_type": "greeting",
+            "reason": f"приветствие{reason_suffix}",
+            "engine": engine,
+        }
     markers = [
         "я хочу",
         "мне нужно",
@@ -67,14 +73,15 @@ def rule_classify(message: str) -> dict[str, Any]:
         "need_search": need_search,
         "need_rewrite": False,
         "query_type": "knowledge_base" if need_search else "general_chat",
-        "reason": "правило fallback",
+        "reason": f"правило fallback{reason_suffix}",
+        "engine": engine,
     }
 
 
 def classify_message(message: str, history: list[dict[str, str]], request_id: str = "-") -> dict[str, Any]:
     started = perf_counter()
     if not has_llm():
-        result = rule_classify(message)
+        result = rule_classify(message, engine="fallback")
         logger.info(
             "request_id=%s stage=classifier event=fallback_result need_search=%s query_type=%s duration_ms=%s",
             request_id,
@@ -108,6 +115,7 @@ def classify_message(message: str, history: list[dict[str, str]], request_id: st
             "need_rewrite": bool(result.get("need_rewrite")),
             "query_type": str(result.get("query_type") or "unclear"),
             "reason": str(result.get("reason") or ""),
+            "engine": "llm",
         }
         logger.info(
             "request_id=%s stage=classifier event=llm_result need_search=%s need_rewrite=%s query_type=%s duration_ms=%s",
@@ -119,8 +127,7 @@ def classify_message(message: str, history: list[dict[str, str]], request_id: st
         )
         return classified
     except Exception as exc:
-        fallback = rule_classify(message)
-        fallback["reason"] += f"; LLM classifier failed: {exc}"
+        fallback = rule_classify(message, engine="fallback_after_llm_error", reason_suffix=f"; LLM classifier failed: {exc}")
         logger.exception("request_id=%s stage=classifier event=llm_failed fallback=%s error=%s", request_id, fallback, exc)
         return fallback
 
