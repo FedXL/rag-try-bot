@@ -14,6 +14,7 @@ from psycopg.rows import dict_row
 
 from app.core.text import normalize_text
 from app.products.models import Product
+from app.products.service import build_ai_text_from_values
 
 
 PARSER_COLUMNS = [
@@ -149,6 +150,7 @@ def build_search_text(data: dict[str, Any]) -> str:
 
 
 def product_defaults(data: dict[str, Any]) -> dict[str, Any]:
+    ai_text = build_ai_text_from_values(data)
     normalized = text(data.get("normalized_text")) or build_search_text(data)
     return {
         "source_url": text(data.get("source_url")),
@@ -179,6 +181,7 @@ def product_defaults(data: dict[str, Any]) -> dict[str, Any]:
         "variant_urls": json_list(data.get("variant_urls")),
         "related_urls": json_list(data.get("related_urls")),
         "raw_payload": json_dict(data.get("raw_payload")),
+        "ai_text": ai_text,
         "normalized_text": normalized,
         "parser_first_seen_at": datetime_or_none(data.get("first_seen_at")),
         "parser_last_seen_at": datetime_or_none(data.get("last_seen_at")),

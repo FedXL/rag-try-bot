@@ -68,6 +68,7 @@ CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/1")
 CELERY_TASK_DEFAULT_QUEUE = "default"
 INTERNAL_API_TOKEN = os.environ.get("INTERNAL_API_TOKEN", "")
+ML_API_URL = os.environ.get("ML_API_URL", "")
 
 LOGGING = {
     "version": 1,

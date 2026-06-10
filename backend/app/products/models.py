@@ -36,6 +36,7 @@ class Product(models.Model):
     related_urls = models.JSONField(default=list, blank=True)
     raw_payload = models.JSONField(default=dict, blank=True)
 
+    ai_text = models.TextField(blank=True, default="")
     normalized_text = models.TextField(blank=True, default="")
     is_active = models.BooleanField(default=True, db_index=True)
     parser_first_seen_at = models.DateTimeField(null=True, blank=True)

@@ -172,7 +172,7 @@ def answer_user_message(
         class_slug = str(classification.get("class_slug") or classification.get("section") or "")
         if class_slug in {"product", "catalog", "brands"}:
             notify_tech(user, request_id, "product", "start", {"query": query[:300], "intent": classification.get("intent")})
-            product_result = answer_product_message(query, classification)
+            product_result = answer_product_message(query, classification, history, request_id=request_id)
             answer = product_result["answer"]
             metadata["route"] = "product"
             metadata["query"] = query
@@ -185,15 +185,17 @@ def answer_user_message(
                 "product",
                 "done",
                 {
-                    "intent": product_result["metadata"].get("intent"),
+                    "action": product_result["metadata"].get("action"),
+                    "tool": product_result["metadata"].get("tool"),
                     "products": len(product_result["metadata"].get("product_ids", [])),
                     "answer_len": len(answer),
                 },
             )
             logger.info(
-                "request_id=%s stage=pipeline event=product_answer_prepared intent=%s products=%s",
+                "request_id=%s stage=pipeline event=product_answer_prepared action=%s tool=%s products=%s",
                 request_id,
-                product_result["metadata"].get("intent"),
+                product_result["metadata"].get("action"),
+                product_result["metadata"].get("tool"),
                 len(product_result["metadata"].get("product_ids", [])),
             )
         elif class_slug == "color_selection":

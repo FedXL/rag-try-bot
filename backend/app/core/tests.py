@@ -179,6 +179,13 @@ class SearchTests(TestCase):
 
 
 class ProductFlowTests(TestCase):
+    def setUp(self):
+        self.llm_patch = patch("app.products.service.llm.has_llm", return_value=False)
+        self.llm_patch.start()
+
+    def tearDown(self):
+        self.llm_patch.stop()
+
     def product(self, **kwargs):
         defaults = {
             "product_key": kwargs.get("sku", "product-1"),
@@ -205,7 +212,7 @@ class ProductFlowTests(TestCase):
         result = answer_product_message("цена артикула 5811071", {"class_slug": "product"})
 
         self.assertIn("Цена: 24 190 KZT", result["answer"])
-        self.assertEqual(result["metadata"]["intent"], "product_price")
+        self.assertEqual(result["metadata"]["intent"], "price_check")
         self.assertEqual(result["metadata"]["sku"], "5811071")
 
     def test_product_stock_by_city(self):
@@ -214,13 +221,29 @@ class ProductFlowTests(TestCase):
         result = answer_product_message("есть ли артикул 5811071 в Алматы", {"class_slug": "product"})
 
         self.assertIn("Алматы: 9 шт.", result["answer"])
-        self.assertEqual(result["metadata"]["intent"], "product_stock")
+        self.assertEqual(result["metadata"]["intent"], "availability_check")
+
+    def test_unknown_sku_does_not_fuzzy_match_other_product(self):
+        self.product(sku="30-0033", product_key="roller-1", name="Сменный валик 30-0033")
+
+        result = answer_product_message("цена артикула 5811071", {"class_slug": "product"})
+
+        self.assertIn("5811071", result["answer"])
+        self.assertEqual(result["metadata"]["product_ids"], [])
+
+    def test_hyphenated_sku_keeps_full_article(self):
+        self.product(sku="30-0232", product_key="roller-2", name="Сменный валик 30-0232")
+
+        result = answer_product_message("цена артикула 30-0232", {"class_slug": "product"})
+
+        self.assertEqual(result["metadata"]["sku"], "30-0232")
+        self.assertEqual(len(result["metadata"]["product_ids"]), 1)
 
     def test_compare_brands_requires_category(self):
         result = answer_product_message("сравни Dulux и Marshall", {"class_slug": "product"})
 
         self.assertIn("Уточните", result["answer"])
-        self.assertEqual(result["metadata"]["intent"], "product_compare")
+        self.assertEqual(result["metadata"]["intent"], "compare_products")
 
     def test_compare_brands_with_category(self):
         self.product(name="Dulux Easy 5л", sku="DULUX1", price_kzt=20000, normalized_text=normalize_text("dulux интерьерные краски стены"))
