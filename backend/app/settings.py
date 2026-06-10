@@ -25,6 +25,8 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "app.content",
+    "app.products",
     "app.core",
 ]
 
@@ -66,8 +68,6 @@ CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/1")
 CELERY_TASK_DEFAULT_QUEUE = "default"
 INTERNAL_API_TOKEN = os.environ.get("INTERNAL_API_TOKEN", "")
-ML_API_URL = os.environ.get("ML_API_URL", "http://ml-api:8000")
-ML_API_TIMEOUT = int(os.environ.get("ML_API_TIMEOUT", "600"))
 
 LOGGING = {
     "version": 1,

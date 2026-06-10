@@ -1,63 +1,56 @@
 import logging
 
 from celery import shared_task
-from django.db import connection
 
-from .models import ArticleChunk, EmbeddingRun
-from .search import ARTICLE_EMBEDDING_ENGINE
+from .models import TelegramUser
+from .telegram_notifications import TelegramNotifier, format_technical_message
 
 logger = logging.getLogger(__name__)
 
 
-def vector_literal(vector: list[float]) -> str:
-    return "[" + ",".join(f"{value:.8f}" for value in vector) + "]"
+@shared_task(name="app.core.tasks.send_telegram_tech_message_task")
+def send_telegram_tech_message_task(payload: dict) -> dict:
+    payload = payload if isinstance(payload, dict) else {"details": {"payload": payload}}
+    request_id = payload.get("request_id") or "-"
+    telegram_id = payload.get("telegram_id")
+    if not telegram_id:
+        logger.info(
+            "request_id=%s stage=telegram_notify event=skipped reason=no_source_user",
+            request_id,
+        )
+        return {"status": "skipped", "reason": "no_source_user", "sent": 0}
 
+    if not TelegramUser.objects.filter(telegram_id=telegram_id, is_superuser=True).exists():
+        logger.info(
+            "request_id=%s stage=telegram_notify event=skipped reason=source_user_not_superuser telegram_id=%s",
+            request_id,
+            telegram_id,
+        )
+        return {"status": "skipped", "reason": "source_user_not_superuser", "sent": 0}
 
-@shared_task(name="app.core.tasks.prepare_embeddings_task")
-def prepare_embeddings_task() -> dict:
-    from .search import embed_texts, ensure_pg
+    recipients = [telegram_id]
 
-    ensure_pg()
-    chunks = list(ArticleChunk.objects.filter(is_active=True).order_by("section", "article_key", "chunk_index"))
-    run, _ = EmbeddingRun.objects.get_or_create(engine=ARTICLE_EMBEDDING_ENGINE)
-    run.status = "building"
-    run.total = len(chunks)
-    run.embedded = 0
-    run.error = ""
-    run.save()
-    batch_size = 32
-    logger.info("request_id=- stage=celery event=prepare_article_embeddings_start total=%s batch_size=%s", len(chunks), batch_size)
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("update core_articlechunk set embedding = null")
-        logger.info("request_id=- stage=celery event=article_embeddings_cleared")
+    notifier = TelegramNotifier()
+    if not notifier.enabled():
+        logger.info(
+            "request_id=%s stage=telegram_notify event=skipped reason=no_token recipients=%s",
+            request_id,
+            len(recipients),
+        )
+        return {"status": "skipped", "reason": "no_token", "sent": 0}
 
-        for start in range(0, len(chunks), batch_size):
-            batch = chunks[start:start + batch_size]
-            logger.info(
-                "request_id=- stage=celery event=article_embedding_batch_start batch_start=%s batch_size=%s",
-                start,
-                len(batch),
+    text = format_technical_message(payload)
+    sent = 0
+    errors: list[str] = []
+    for chat_id in recipients:
+        try:
+            sent += notifier.send_message(chat_id, text)
+        except Exception as exc:
+            errors.append(f"{chat_id}: {exc}")
+            logger.exception(
+                "request_id=%s stage=telegram_notify event=send_failed chat_id=%s error=%s",
+                request_id,
+                chat_id,
+                exc,
             )
-            texts = [f"{chunk.title}\n\n{chunk.chunk_text}".strip() for chunk in batch]
-            vectors = embed_texts(texts, request_id="celery-index")
-            with connection.cursor() as cursor:
-                for chunk, vector in zip(batch, vectors):
-                    cursor.execute(
-                        "update core_articlechunk set embedding = %s::vector where id = %s",
-                        [vector_literal(vector), chunk.id],
-                    )
-            run.embedded += len(batch)
-            run.save(update_fields=["embedded", "updated_at"])
-            logger.info("request_id=- stage=celery event=article_embedding_batch_done embedded=%s total=%s", run.embedded, run.total)
-
-        run.status = "ready"
-        run.save(update_fields=["status", "updated_at"])
-        logger.info("request_id=- stage=celery event=prepare_article_embeddings_done total=%s embedded=%s", run.total, run.embedded)
-        return {"status": "ready", "total": run.total, "embedded": run.embedded}
-    except Exception as exc:
-        run.status = "error"
-        run.error = str(exc)
-        run.save(update_fields=["status", "error", "updated_at"])
-        logger.exception("request_id=- stage=celery event=prepare_article_embeddings_failed error=%s", exc)
-        raise
+    return {"status": "ok" if not errors else "partial", "recipients": len(recipients), "sent": sent, "errors": errors}

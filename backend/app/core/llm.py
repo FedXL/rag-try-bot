@@ -7,8 +7,10 @@ from typing import Any
 
 from openai import OpenAI
 
+from app.content.models import ClassifierClass
+
 from .classifier import classify_rule
-from .models import SECTION_VALUES
+from .models import LLMRequestLog
 
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
 XAI_BASE_URL = os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1")
@@ -25,14 +27,70 @@ def client() -> OpenAI:
     return OpenAI(api_key=XAI_API_KEY, base_url=XAI_BASE_URL)
 
 
-def chat(messages: list[dict[str, str]], temperature: float = 0.2, response_format: dict[str, Any] | None = None) -> str:
+def safe_log_llm(payload: dict[str, Any]) -> None:
+    try:
+        LLMRequestLog.objects.create(**payload)
+    except Exception as exc:
+        logger.warning("request_id=%s stage=llm_log event=write_failed error=%s", payload.get("request_id"), exc)
+
+
+def response_metadata(response: Any) -> dict[str, Any]:
+    usage = getattr(response, "usage", None)
+    return {
+        "id": getattr(response, "id", ""),
+        "created": getattr(response, "created", None),
+        "usage": usage.model_dump(mode="json") if hasattr(usage, "model_dump") else {},
+    }
+
+
+def chat(
+    messages: list[dict[str, str]],
+    temperature: float = 0.2,
+    response_format: dict[str, Any] | None = None,
+    request_id: str = "-",
+    purpose: str = "chat",
+) -> str:
     if not XAI_API_KEY:
         raise RuntimeError("XAI_API_KEY is not configured")
+    started = perf_counter()
     kwargs: dict[str, Any] = {"model": XAI_MODEL, "messages": messages, "temperature": temperature}
     if response_format:
         kwargs["response_format"] = response_format
-    response = client().chat.completions.create(**kwargs)
-    return response.choices[0].message.content or ""
+    try:
+        response = client().chat.completions.create(**kwargs)
+        content = response.choices[0].message.content or ""
+        safe_log_llm(
+            {
+                "request_id": request_id,
+                "purpose": purpose,
+                "provider": "xai",
+                "model": XAI_MODEL,
+                "temperature": temperature,
+                "request_messages": messages,
+                "request_payload": {"response_format": response_format or {}},
+                "response_text": content,
+                "response_payload": response_metadata(response),
+                "status": "success",
+                "duration_ms": round((perf_counter() - started) * 1000),
+            }
+        )
+        return content
+    except Exception as exc:
+        safe_log_llm(
+            {
+                "request_id": request_id,
+                "purpose": purpose,
+                "provider": "xai",
+                "model": XAI_MODEL,
+                "temperature": temperature,
+                "request_messages": messages,
+                "request_payload": {"response_format": response_format or {}},
+                "status": "error",
+                "error": str(exc),
+                "duration_ms": round((perf_counter() - started) * 1000),
+            }
+        )
+        raise
 
 
 def parse_json(text: str) -> dict[str, Any]:
@@ -45,19 +103,134 @@ def parse_json(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-def normalize_section(value: Any, fallback: str = "mixed") -> str:
+def active_classifier_classes() -> list[ClassifierClass]:
+    return list(ClassifierClass.objects.filter(is_active=True).order_by("slug"))
+
+
+def allowed_class_slugs(classes: list[ClassifierClass]) -> set[str]:
+    return {item.slug for item in classes}
+
+
+def normalize_section(value: Any, fallback: str = "mixed", allowed_slugs: set[str] | None = None) -> str:
     section = str(value or fallback).strip()
-    if section == "brands":
-        return "catalog"
-    return section if section in SECTION_VALUES else fallback
+    if section in {"brands", "catalog"}:
+        section = "product"
+    if allowed_slugs:
+        return section if section in allowed_slugs else fallback
+    return section
+
+
+def should_bypass_llm(rule_result: dict[str, Any]) -> bool:
+    return rule_result.get("query_type") in {"greeting", "general_chat"} and rule_result.get("class_slug") == "none"
+
+
+def format_classifier_classes(classes: list[ClassifierClass]) -> str:
+    rows: list[str] = []
+    for item in classes:
+        rows.append(
+            "\n".join(
+                [
+                    f"- {item.slug}",
+                    f"  title: {item.title}",
+                    f"  kind: {item.kind}",
+                    f"  description: {item.description or '-'}",
+                ]
+            )
+        )
+    return "\n".join(rows)
+
+
+def build_classifier_prompt(message: str, history: list[dict[str, str]], classes: list[ClassifierClass]) -> str:
+    history_text = "\n".join(f"{item['role']}: {item['content']}" for item in history[-6:])
+    class_slugs = " | ".join(item.slug for item in classes)
+    allowed_slugs = allowed_class_slugs(classes)
+    rule_rows: list[str] = []
+    example_rows: list[str] = []
+
+    if "contacts" in allowed_slugs:
+        rule_rows.append(
+            "- contacts: адреса, телефоны, режим работы, где находится магазин, где забрать заказ или товар, "
+            "самовывоз как место получения, город Алматы/Астана."
+        )
+        example_rows.append(
+            '- "А где забрать краску в Алматы" -> contacts, потому что пользователь спрашивает место получения/адрес в городе.'
+        )
+    if "product" in allowed_slugs:
+        rule_rows.append(
+            "- product: цена, наличие, остатки, артикул, SKU, конкретный товар, бренд, категория товара, подбор товара, "
+            "сравнение товаров/брендов, расчет бюджета по товарам."
+        )
+        example_rows.extend(
+            [
+                '- "есть краска Dulux в Алматы" -> product, потому что пользователь спрашивает наличие товара.',
+                '- "сколько стоит артикул 5811071" -> product, потому что пользователь спрашивает цену конкретного товара.',
+            ]
+        )
+    if "help" in allowed_slugs:
+        rule_rows.append(
+            "- help: правила доставки, оплаты, возврата, гарантии, как оформить заказ, условия сервиса."
+        )
+        example_rows.append(
+            '- "как оформить доставку" -> help, потому что пользователь спрашивает правило/процесс доставки.'
+        )
+    if "none" in allowed_slugs:
+        rule_rows.append("- none: приветствие, small talk или сообщение, где не нужен поиск по базе.")
+    if "mixed" in allowed_slugs:
+        rule_rows.append(
+            "- mixed: только если вопрос реально относится к нескольким классам и без уточнения нельзя выбрать один."
+        )
+
+    classifier_rules = "\n".join(rule_rows) or "- Выбирай только class_slug из списка активных классов."
+    classifier_examples = "\n".join(example_rows) or "- Используй описания активных классов как источник правил выбора."
+    return f"""
+Ты классификатор Telegram-бота магазина "Центр Красок".
+
+Задача:
+1. Определи, нужно ли отвечать на сообщение через базу данных.
+2. Если база нужна, выбери ровно один class_slug из списка активных классов.
+3. Если база не нужна, выбери class_slug="none".
+4. Если вопрос относится к нескольким классам или невозможно выбрать один класс, выбери class_slug="mixed".
+
+Используй историю только для восстановления контекста текущего вопроса.
+Не отвечай пользователю. Верни только JSON.
+
+Активные классы:
+{format_classifier_classes(classes)}
+
+Правила выбора:
+{classifier_rules}
+
+Примеры:
+{classifier_examples}
+
+История:
+{history_text or "(пусто)"}
+
+Сообщение пользователя:
+{message}
+
+Верни JSON строго в таком формате:
+{{
+  "need_search": true,
+  "need_rewrite": false,
+  "query_type": "knowledge_base | general_chat | greeting | unclear",
+  "class_slug": "{class_slugs}",
+  "section": "тот же class_slug",
+  "intent": "короткий машинный intent",
+  "slots": {{}},
+  "rewritten_query": "самостоятельный поисковый запрос для выбранного класса",
+  "confidence": 0.0,
+  "reason": "короткая причина выбора класса"
+}}
+"""
 
 
 def classify_message(message: str, history: list[dict[str, str]], request_id: str = "-") -> dict[str, Any]:
     started = perf_counter()
     rule_result = classify_rule(message, history, engine="domain_rules")
-    if not has_llm() or float(rule_result.get("confidence", 0)) >= 0.7:
+    if should_bypass_llm(rule_result):
         logger.info(
-            "request_id=%s stage=classifier event=rule_result need_search=%s query_type=%s section=%s intent=%s confidence=%s duration_ms=%s",
+            "request_id=%s stage=classifier event=rule_bypass need_search=%s query_type=%s section=%s intent=%s confidence=%s duration_ms=%s",
             request_id,
             rule_result.get("need_search"),
             rule_result.get("query_type"),
@@ -68,50 +241,28 @@ def classify_message(message: str, history: list[dict[str, str]], request_id: st
         )
         return rule_result
 
-    history_text = "\n".join(f"{item['role']}: {item['content']}" for item in history[-6:])
-    prompt = f"""
-Ты классификатор Telegram RAG-бота магазина "Центр Красок".
+    if not has_llm():
+        logger.info(
+            "request_id=%s stage=classifier event=rule_fallback reason=no_llm need_search=%s query_type=%s section=%s intent=%s confidence=%s duration_ms=%s",
+            request_id,
+            rule_result.get("need_search"),
+            rule_result.get("query_type"),
+            rule_result.get("section"),
+            rule_result.get("intent"),
+            rule_result.get("confidence"),
+            round((perf_counter() - started) * 1000),
+        )
+        return rule_result
 
-Сделай два шага:
-1. Определи, нужно ли искать ответ в базе знаний.
-2. Если искать нужно, выбери раздел сайта.
+    classes = active_classifier_classes()
+    allowed_slugs = allowed_class_slugs(classes)
+    if not classes:
+        logger.warning("request_id=%s stage=classifier event=rule_fallback reason=no_active_classes", request_id)
+        return rule_result
 
-Разделы:
-- catalog: каталог товаров, бренды, SKU, артикулы, категории, наличие, цена.
-- help: доставка, оплата, возврат, заказ, самовывоз, гарантии.
-- about: кто магазин, чем занимается, ассортимент, качество, безопасность, колеровка как часть описания компании.
-- inspiration: идеи интерьера, вдохновение, тренды, примеры.
-- color_selection: подбор цвета, колеровка, палитры, оттенки.
-- partners: дизайнеры, строители, партнерство, сотрудничество.
-- glossary: термины и определения.
-- contacts: адреса, телефоны, режим работы, как добраться.
-- news_articles: новости, статьи, обзоры.
-- mixed: вопрос относится к нескольким разделам или раздел неясен.
-- none: поиск не нужен.
-
-Если пользователь спрашивает про бренды, выбирай catalog.
-
-История:
-{history_text or "(пусто)"}
-
-Сообщение:
-{message}
-
-Верни только JSON:
-{{
-  "need_search": true,
-  "need_rewrite": false,
-  "query_type": "knowledge_base | general_chat | greeting | unclear",
-  "section": "catalog | help | about | inspiration | color_selection | partners | glossary | contacts | news_articles | mixed | none",
-  "intent": "короткий машинный intent",
-  "slots": {{}},
-  "rewritten_query": "самостоятельный поисковый запрос",
-  "confidence": 0.0,
-  "reason": "короткая причина"
-}}
-"""
+    prompt = build_classifier_prompt(message, history, classes)
     try:
-        logger.info("request_id=%s stage=classifier event=llm_request model=%s history=%s", request_id, XAI_MODEL, len(history))
+        logger.info("request_id=%s stage=classifier event=llm_request model=%s history=%s classes=%s", request_id, XAI_MODEL, len(history), len(classes))
         result = parse_json(
             chat(
                 [
@@ -120,17 +271,21 @@ def classify_message(message: str, history: list[dict[str, str]], request_id: st
                 ],
                 temperature=0,
                 response_format={"type": "json_object"},
+                request_id=request_id,
+                purpose="classifier",
             )
         )
-        section = normalize_section(result.get("section"), normalize_section(rule_result.get("section"), "mixed"))
         need_search = bool(result.get("need_search"))
+        fallback = "mixed" if "mixed" in allowed_slugs else next(iter(sorted(allowed_slugs)))
+        section = normalize_section(result.get("class_slug") or result.get("section"), fallback, allowed_slugs)
         if not need_search:
-            section = "none"
+            section = "none" if "none" in allowed_slugs else fallback
         classified = {
             "need_search": need_search,
             "need_rewrite": bool(result.get("need_rewrite")),
             "query_type": str(result.get("query_type") or ("knowledge_base" if need_search else "general_chat")),
             "section": section,
+            "class_slug": section,
             "intent": str(result.get("intent") or rule_result.get("intent") or "unclear"),
             "search_scope": section,
             "slots": result.get("slots") if isinstance(result.get("slots"), dict) else rule_result.get("slots", {}),
@@ -180,6 +335,8 @@ def rewrite_query(message: str, history: list[dict[str, str]], request_id: str =
                 {"role": "user", "content": prompt},
             ],
             temperature=0,
+            request_id=request_id,
+            purpose="query_rewrite",
         ).strip().strip('"')
         logger.info("request_id=%s stage=query_rewrite event=done query_len=%s duration_ms=%s", request_id, len(rewritten), round((perf_counter() - started) * 1000))
         return rewritten
@@ -199,7 +356,7 @@ def direct_answer(message: str, history: list[dict[str, str]], request_id: str =
     messages = [{"role": "system", "content": "Ты русский Telegram-ассистент магазина. Отвечай только на русском."}]
     messages.extend(history[-6:])
     messages.append({"role": "user", "content": message})
-    answer = chat(messages, temperature=0.3).strip()
+    answer = chat(messages, temperature=0.3, request_id=request_id, purpose="direct_answer").strip()
     logger.info("request_id=%s stage=answer event=direct_llm_done answer_len=%s duration_ms=%s", request_id, len(answer), round((perf_counter() - started) * 1000))
     return answer
 
@@ -213,7 +370,8 @@ def grounded_answer(question: str, candidates: list[dict[str, Any]], history: li
         return candidates[0].get("answer") or "Ответ найден, но текст ответа пустой."
 
     context = "\n\n".join(
-        f"[{index}] Раздел: {candidate.get('section') or '-'}\n"
+        f"[{index}] Тип: {candidate.get('content_type') or 'article'}\n"
+        f"Раздел: {candidate.get('class_slug') or candidate.get('section') or '-'}\n"
         f"Заголовок: {candidate.get('question') or candidate.get('title') or '-'}\n"
         f"Фрагмент: {candidate.get('answer') or candidate.get('chunk_text') or ''}"
         for index, candidate in enumerate(candidates[:5], start=1)
@@ -235,6 +393,8 @@ def grounded_answer(question: str, candidates: list[dict[str, Any]], history: li
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
+        request_id=request_id,
+        purpose="grounded_answer",
     ).strip()
     logger.info("request_id=%s stage=answer event=grounded_llm_done candidates=%s answer_len=%s duration_ms=%s", request_id, len(candidates), len(answer), round((perf_counter() - started) * 1000))
     return answer

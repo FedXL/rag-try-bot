@@ -11,3 +11,8 @@ celerybeat-schedule
 .ruff_cache/
 .vscode/
 .idea/
+*.dump
+*.tar
+*.jsonl
+exports/
+contacts_page.html

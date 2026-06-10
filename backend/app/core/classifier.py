@@ -25,7 +25,7 @@ SECTION_MARKERS: dict[str, list[str]] = {
         "безопасные",
         "сертифицированные",
     ],
-    "catalog": [
+    "product": [
         "каталог",
         "товар",
         "артикул",
@@ -91,10 +91,10 @@ def detect_section(text: str) -> tuple[str, str, float]:
             scores[section] = score
 
     if ARTICLE_CODE_RE.search(text):
-        scores["catalog"] = scores.get("catalog", 0) + 4
+        scores["product"] = scores.get("product", 0) + 4
 
     if "бренд" in text or "бренды" in text:
-        scores["catalog"] = scores.get("catalog", 0) + 2
+        scores["product"] = scores.get("product", 0) + 2
 
     if not scores:
         return "mixed", "unclear", 0.45
@@ -102,7 +102,7 @@ def detect_section(text: str) -> tuple[str, str, float]:
     section, score = sorted(scores.items(), key=lambda item: item[1], reverse=True)[0]
     intent_by_section = {
         "about": "about_company",
-        "catalog": "catalog_lookup",
+        "product": "product_lookup",
         "help": "help",
         "inspiration": "inspiration",
         "color_selection": "color_selection",
@@ -139,6 +139,7 @@ def classify_rule(message: str, history: list[dict[str, str]] | None = None, eng
             "need_rewrite": False,
             "query_type": "general_chat",
             "section": "none",
+            "class_slug": "none",
             "intent": "empty",
             "search_scope": "none",
             "slots": {},
@@ -154,6 +155,7 @@ def classify_rule(message: str, history: list[dict[str, str]] | None = None, eng
             "need_rewrite": False,
             "query_type": "greeting",
             "section": "none",
+            "class_slug": "none",
             "intent": "greeting",
             "search_scope": "none",
             "slots": {},
@@ -175,6 +177,7 @@ def classify_rule(message: str, history: list[dict[str, str]] | None = None, eng
         "need_rewrite": False,
         "query_type": "knowledge_base" if need_search else "general_chat",
         "section": section if need_search else "none",
+        "class_slug": section if need_search else "none",
         "intent": intent,
         "search_scope": section if need_search else "none",
         "slots": extract_slots(text),

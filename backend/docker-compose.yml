@@ -1,0 +1,88 @@
+services:
+  db:
+    image: pgvector/pgvector:pg15
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ragbot_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.app
+    env_file: .env
+    command: ["sh", "/app/entrypoint-web.sh"]
+    volumes:
+      - ragbot_staticfiles:/app/staticfiles
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "9001:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ragbot_staticfiles:/staticfiles:ro
+    depends_on:
+      web:
+        condition: service_started
+    restart: unless-stopped
+
+  celery:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.app
+    env_file: .env
+    command: ["celery", "-A", "app.celery_app", "worker", "-Q", "default", "--loglevel=INFO"]
+    depends_on:
+      web:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.app
+    env_file: .env
+    command: ["celery", "-A", "app.celery_app", "beat", "--loglevel=INFO"]
+    depends_on:
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.app
+    env_file: .env
+    command: ["python", "-m", "bot.main"]
+    depends_on:
+      web:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  ragbot_pgdata:
+  ragbot_staticfiles:
