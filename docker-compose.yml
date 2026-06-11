@@ -101,6 +101,8 @@ services:
     depends_on:
       web:
         condition: service_started
+      redis:
+        condition: service_started
     restart: unless-stopped
 
 volumes:

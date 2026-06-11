@@ -1,9 +1,11 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.conf import settings
 from django.test import TestCase
 
+from bot.user_lock import UserMessageLock
 from app.color_selection.service import answer_color_selection_message
 from app.content.models import CLASS_DEFINITIONS, ClassifierClass, QuickPhrase, Source
 from app.products.models import Product
@@ -547,3 +549,25 @@ class ChatHistoryTests(TestCase):
         self.assertEqual(messages[0].role, ChatMessage.ROLE_USER)
         self.assertEqual(messages[1].role, ChatMessage.ROLE_ASSISTANT)
         classify_message.assert_not_called()
+
+
+class UserMessageLockTests(TestCase):
+    def test_same_user_second_message_is_blocked_until_release(self):
+        async def scenario():
+            lock = UserMessageLock(redis_url="", lock_ttl_seconds=60, busy_notice_ttl_seconds=20)
+            self.assertTrue(await lock.acquire(1001, "req-1"))
+            self.assertFalse(await lock.acquire(1001, "req-2"))
+            self.assertTrue(await lock.acquire(1002, "req-3"))
+            await lock.release(1001, "req-1")
+            self.assertTrue(await lock.acquire(1001, "req-4"))
+
+        asyncio.run(scenario())
+
+    def test_busy_notice_is_rate_limited(self):
+        async def scenario():
+            lock = UserMessageLock(redis_url="", lock_ttl_seconds=60, busy_notice_ttl_seconds=20)
+            self.assertTrue(await lock.should_send_busy_notice(1001))
+            self.assertFalse(await lock.should_send_busy_notice(1001))
+            self.assertTrue(await lock.should_send_busy_notice(1002))
+
+        asyncio.run(scenario())

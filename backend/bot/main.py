@@ -10,11 +10,17 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
+from .user_lock import UserMessageLock
+
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 DJANGO_API_BASE_URL = os.environ.get("DJANGO_API_BASE_URL", "http://web:9001")
 INTERNAL_API_TOKEN = os.environ.get("INTERNAL_API_TOKEN", "")
 BOT_DEBUG_MESSAGES = os.environ.get("BOT_DEBUG_MESSAGES", "0") == "1"
 TELEGRAM_MESSAGE_LIMIT = 3900
+REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/2")
+USER_MESSAGE_LOCK_TTL_SECONDS = int(os.environ.get("USER_MESSAGE_LOCK_TTL_SECONDS", "660"))
+USER_BUSY_NOTICE_TTL_SECONDS = int(os.environ.get("USER_BUSY_NOTICE_TTL_SECONDS", "20"))
+USER_BUSY_MESSAGE = os.environ.get("USER_BUSY_MESSAGE", "Я уже отвечаю на предыдущий вопрос. Дождитесь ответа, пожалуйста.")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -167,15 +173,21 @@ async def send_text(message: Message, text: str) -> None:
 async def main() -> None:
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
+    user_locks = UserMessageLock(
+        redis_url=REDIS_URL,
+        lock_ttl_seconds=USER_MESSAGE_LOCK_TTL_SECONDS,
+        busy_notice_ttl_seconds=USER_BUSY_NOTICE_TTL_SECONDS,
+    )
 
     async def handle(message: Message, text: str) -> None:
         if message.from_user is None:
             return
         request_id = uuid4().hex[:12]
+        telegram_id = message.from_user.id
         logger.info(
             "request_id=%s stage=telegram->bot event=message_received telegram_id=%s username=%s message_id=%s text_len=%s",
             request_id,
-            message.from_user.id,
+            telegram_id,
             message.from_user.username or "",
             message.message_id,
             len(text),
@@ -184,28 +196,38 @@ async def main() -> None:
             logger.info("request_id=%s stage=bot event=rejected reason=message_too_long", request_id)
             await message.answer("Сообщение слишком длинное. Отправьте текст до 2000 символов.")
             return
-        payload = {
-            "request_id": request_id,
-            "debug": BOT_DEBUG_MESSAGES,
-            "message": text,
-            "telegram_id": message.from_user.id,
-            "telegram_message_id": message.message_id,
-            "username": message.from_user.username or "",
-            "first_name": message.from_user.first_name or "",
-            "last_name": message.from_user.last_name or "",
-        }
+
+        if not await user_locks.acquire(telegram_id, request_id):
+            logger.info("request_id=%s stage=bot event=rejected reason=user_request_inflight telegram_id=%s", request_id, telegram_id)
+            if await user_locks.should_send_busy_notice(telegram_id):
+                await message.answer(USER_BUSY_MESSAGE)
+            return
+
         try:
-            data = await call_chat(payload)
-            debug = data.get("debug") if BOT_DEBUG_MESSAGES else None
-            if isinstance(debug, dict):
-                await send_text(message, format_classifier_debug(debug))
-                await send_text(message, format_search_debug(debug))
-            answer = str(data.get("answer") or "Не удалось получить ответ.")
-        except Exception as exc:
-            logger.exception("request_id=%s stage=bot event=chat_failed error=%s", request_id, exc)
-            answer = "Сервис временно недоступен. Попробуйте позже."
-        await send_text(message, answer)
-        logger.info("request_id=%s stage=bot->telegram event=answer_sent answer_len=%s debug=%s", request_id, len(answer), BOT_DEBUG_MESSAGES)
+            payload = {
+                "request_id": request_id,
+                "debug": BOT_DEBUG_MESSAGES,
+                "message": text,
+                "telegram_id": telegram_id,
+                "telegram_message_id": message.message_id,
+                "username": message.from_user.username or "",
+                "first_name": message.from_user.first_name or "",
+                "last_name": message.from_user.last_name or "",
+            }
+            try:
+                data = await call_chat(payload)
+                debug = data.get("debug") if BOT_DEBUG_MESSAGES else None
+                if isinstance(debug, dict):
+                    await send_text(message, format_classifier_debug(debug))
+                    await send_text(message, format_search_debug(debug))
+                answer = str(data.get("answer") or "Не удалось получить ответ.")
+            except Exception as exc:
+                logger.exception("request_id=%s stage=bot event=chat_failed error=%s", request_id, exc)
+                answer = "Сервис временно недоступен. Попробуйте позже."
+            await send_text(message, answer)
+            logger.info("request_id=%s stage=bot->telegram event=answer_sent answer_len=%s debug=%s", request_id, len(answer), BOT_DEBUG_MESSAGES)
+        finally:
+            await user_locks.release(telegram_id, request_id)
 
     @dp.message(CommandStart())
     async def start(message: Message) -> None:
@@ -216,7 +238,10 @@ async def main() -> None:
         await handle(message, (message.text or "").strip())
 
     logger.info("Starting Telegram bot polling debug_messages=%s", BOT_DEBUG_MESSAGES)
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await user_locks.close()
 
 
 if __name__ == "__main__":
