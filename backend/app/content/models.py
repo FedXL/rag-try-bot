@@ -22,7 +22,7 @@ CLASS_DEFINITIONS = [
     {"slug": "help", "title": "Помощь", "description": "Доставка, оплата, возврат, заказ, самовывоз и гарантии.", "kind": "source"},
     {"slug": "about", "title": "О магазине", "description": "Кто магазин, чем занимается, ассортимент, качество и безопасность.", "kind": "source"},
     {"slug": "inspiration", "title": "Вдохновение", "description": "Идеи интерьера, вдохновение, тренды и примеры.", "kind": "source"},
-    {"slug": "color_selection", "title": "Подбор цвета", "description": "Подбор цвета, колеровка, палитры и оттенки.", "kind": "source"},
+    {"slug": "color_selection", "title": "Подбор цвета", "description": "Подбор цвета, колеровка, палитры и оттенки.", "kind": "color_selection"},
     {"slug": "partners", "title": "Партнерам", "description": "Дизайнеры, строители, партнерство и сотрудничество.", "kind": "source"},
     {"slug": "glossary", "title": "Глоссарий", "description": "Термины и определения.", "kind": "source"},
     {"slug": "contacts", "title": "Контакты", "description": "Адреса, телефоны, режим работы и как добраться.", "kind": "source"},
@@ -36,6 +36,7 @@ class ClassifierClass(models.Model):
     KIND_CHOICES = [
         ("source", "Source"),
         ("product", "Product"),
+        ("color_selection", "Color selection"),
         ("system", "System"),
     ]
 

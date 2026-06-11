@@ -107,6 +107,10 @@ def active_classifier_classes() -> list[ClassifierClass]:
     return list(ClassifierClass.objects.filter(is_active=True).order_by("slug"))
 
 
+def active_classifier_slugs() -> set[str]:
+    return set(ClassifierClass.objects.filter(is_active=True).values_list("slug", flat=True))
+
+
 def allowed_class_slugs(classes: list[ClassifierClass]) -> set[str]:
     return {item.slug for item in classes}
 
@@ -122,6 +126,24 @@ def normalize_section(value: Any, fallback: str = "mixed", allowed_slugs: set[st
 
 def should_bypass_llm(rule_result: dict[str, Any]) -> bool:
     return rule_result.get("query_type") in {"greeting", "general_chat"} and rule_result.get("class_slug") == "none"
+
+
+def enforce_active_class(result: dict[str, Any]) -> dict[str, Any]:
+    class_slug = str(result.get("class_slug") or result.get("section") or "none")
+    if class_slug in {"", "none"}:
+        return result
+    active_slugs = active_classifier_slugs()
+    if class_slug in active_slugs:
+        return result
+    fallback = "mixed" if "mixed" in active_slugs else "none"
+    cleaned = dict(result)
+    cleaned["need_search"] = fallback != "none"
+    cleaned["class_slug"] = fallback
+    cleaned["section"] = fallback
+    cleaned["search_scope"] = fallback
+    cleaned["intent"] = "inactive_class"
+    cleaned["reason"] = f"{result.get('reason') or ''}; class {class_slug} is inactive".strip("; ")
+    return cleaned
 
 
 def format_classifier_classes(classes: list[ClassifierClass]) -> str:
@@ -239,7 +261,7 @@ def classify_message(message: str, history: list[dict[str, str]], request_id: st
             rule_result.get("confidence"),
             round((perf_counter() - started) * 1000),
         )
-        return rule_result
+        return enforce_active_class(rule_result)
 
     if not has_llm():
         logger.info(
@@ -252,13 +274,13 @@ def classify_message(message: str, history: list[dict[str, str]], request_id: st
             rule_result.get("confidence"),
             round((perf_counter() - started) * 1000),
         )
-        return rule_result
+        return enforce_active_class(rule_result)
 
     classes = active_classifier_classes()
     allowed_slugs = allowed_class_slugs(classes)
     if not classes:
         logger.warning("request_id=%s stage=classifier event=rule_fallback reason=no_active_classes", request_id)
-        return rule_result
+        return enforce_active_class(rule_result)
 
     prompt = build_classifier_prompt(message, history, classes)
     try:
@@ -309,7 +331,7 @@ def classify_message(message: str, history: list[dict[str, str]], request_id: st
         fallback = classify_rule(message, history, engine="domain_rules_after_llm_error")
         fallback["reason"] += f"; LLM classifier failed: {exc}"
         logger.exception("request_id=%s stage=classifier event=llm_failed fallback=%s error=%s", request_id, fallback, exc)
-        return fallback
+        return enforce_active_class(fallback)
 
 
 def rewrite_query(message: str, history: list[dict[str, str]], request_id: str = "-") -> str:

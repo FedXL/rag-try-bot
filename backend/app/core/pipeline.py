@@ -2,6 +2,8 @@ import logging
 from time import perf_counter
 from typing import Any
 
+from app.content.models import ClassifierClass
+
 from . import llm
 from .models import ChatMessage, TelegramUser
 from .search import search
@@ -37,6 +39,19 @@ def history_for_user(user: TelegramUser, limit: int = 6) -> list[dict[str, str]]
     rows = list(user.messages.order_by("-created_at")[:limit])
     rows.reverse()
     return [{"role": row.role, "content": row.text} for row in rows]
+
+
+def classifier_kind_for_slug(class_slug: str) -> str:
+    if class_slug in {"catalog", "brands"}:
+        class_slug = "product"
+    if not class_slug:
+        return ""
+    kind = (
+        ClassifierClass.objects.filter(slug=class_slug, is_active=True)
+        .values_list("kind", flat=True)
+        .first()
+    )
+    return str(kind or "")
 
 
 def compact_search_debug(result: dict[str, Any], query: str) -> dict[str, Any]:
@@ -170,7 +185,9 @@ def answer_user_message(
         )
 
         class_slug = str(classification.get("class_slug") or classification.get("section") or "")
-        if class_slug in {"product", "catalog", "brands"}:
+        class_kind = classifier_kind_for_slug(class_slug)
+        metadata["class_kind"] = class_kind
+        if class_kind == "product" or class_slug in {"product", "catalog", "brands"}:
             notify_tech(user, request_id, "product", "start", {"query": query[:300], "intent": classification.get("intent")})
             product_result = answer_product_message(query, classification, history, request_id=request_id)
             answer = product_result["answer"]
@@ -198,7 +215,7 @@ def answer_user_message(
                 product_result["metadata"].get("tool"),
                 len(product_result["metadata"].get("product_ids", [])),
             )
-        elif class_slug == "color_selection":
+        elif class_kind == "color_selection" or class_slug == "color_selection":
             notify_tech(user, request_id, "color_selection", "start", {"query": query[:300], "intent": classification.get("intent")})
             color_result = answer_color_selection_message(query, classification, history, request_id=request_id)
             answer = color_result["answer"]

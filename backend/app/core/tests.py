@@ -4,6 +4,7 @@ from unittest.mock import patch
 from django.conf import settings
 from django.test import TestCase
 
+from app.color_selection.service import answer_color_selection_message
 from app.content.models import CLASS_DEFINITIONS, ClassifierClass, QuickPhrase, Source
 from app.products.models import Product
 from app.products.service import answer_product_message
@@ -91,6 +92,23 @@ class ClassifierTests(TestCase):
         self.assertNotIn("- contacts", prompt)
         self.assertIn("- product", prompt)
 
+    def test_rule_fallback_does_not_return_inactive_class(self):
+        self.classes["product"].is_active = False
+        self.classes["product"].save(update_fields=["is_active"])
+
+        result = llm.enforce_active_class(
+            {
+                "need_search": True,
+                "class_slug": "product",
+                "section": "product",
+                "intent": "product_lookup",
+                "reason": "rule result",
+            }
+        )
+
+        self.assertNotEqual(result["class_slug"], "product")
+        self.assertEqual(result["intent"], "inactive_class")
+
     @patch("app.core.llm.chat")
     def test_unknown_llm_class_slug_normalizes_to_mixed(self, chat_mock):
         chat_mock.return_value = '{"need_search": true, "class_slug": "delivery", "section": "delivery", "intent": "delivery", "slots": {}, "rewritten_query": "доставка", "confidence": 0.8, "reason": "bad class"}'
@@ -108,6 +126,9 @@ class ClassifierTests(TestCase):
 
         self.assertEqual(result["class_slug"], "none")
         chat_mock.assert_not_called()
+
+    def test_color_selection_class_has_custom_kind(self):
+        self.assertEqual(self.classes["color_selection"].kind, "color_selection")
 
 
 class SearchTests(TestCase):
@@ -333,6 +354,39 @@ class ProductFlowTests(TestCase):
         answer_color_selection_message.assert_called_once()
         search_mock.assert_not_called()
         grounded_answer.assert_not_called()
+
+
+class ColorSelectionFlowTests(TestCase):
+    def test_general_color_question_returns_three_site_links(self):
+        result = answer_color_selection_message("как подобрать цвет краски", {"intent": "color_selection"})
+
+        self.assertEqual(result["metadata"]["engine"], "link_flow")
+        self.assertEqual(result["metadata"]["option"], "all")
+        self.assertIn("Здорово, у нас есть несколько приятных способов подобрать цвет.", result["answer"])
+        self.assertIn("https://centr-krasok.kz/tinting/", result["answer"])
+        self.assertIn("https://centr-krasok.kz/colors/psychotype/", result["answer"])
+        self.assertIn("https://centr-krasok.kz/tints/", result["answer"])
+        self.assertNotIn("напишите 1", result["answer"].lower())
+
+    def test_psychotype_request_returns_only_psychotype_link(self):
+        result = answer_color_selection_message("давай по психотипу", {"intent": "color_selection_by_psychotype"})
+
+        self.assertEqual(result["metadata"]["option"], "psychotype")
+        self.assertIn("Подбор цвета по психотипу", result["answer"])
+        self.assertIn("https://centr-krasok.kz/colors/psychotype/", result["answer"])
+        self.assertNotIn("https://centr-krasok.kz/tinting/", result["answer"])
+        self.assertNotIn("https://centr-krasok.kz/tints/", result["answer"])
+
+    def test_request_for_shades_sends_to_palettes_without_inventing_colors(self):
+        result = answer_color_selection_message(
+            "хочу 3-4 оттенка",
+            {"intent": "suggest_shades"},
+            [{"role": "assistant", "content": "Здорово, у нас есть несколько приятных способов подобрать цвет."}],
+        )
+
+        self.assertEqual(result["metadata"]["option"], "palettes")
+        self.assertIn("Палитры оттенков", result["answer"])
+        self.assertIn("https://centr-krasok.kz/tints/", result["answer"])
 
 
 class SearchApiTests(TestCase):
