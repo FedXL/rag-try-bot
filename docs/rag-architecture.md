@@ -1,17 +1,17 @@
-# RAG Architecture
+# Архитектура RAG
 
-This document describes the current request flow implemented by the Telegram
-RAG bot. It intentionally separates the source knowledge-base path from the
-product search path because they use different retrieval strategies.
+Этот документ описывает текущий путь запроса в Telegram RAG-боте. Схема
+отдельно показывает обычный поиск по базе знаний и продуктовый поиск, потому
+что в коде они используют разные стратегии поиска.
 
-## Runtime Services
+## Сервисы
 
 ```mermaid
 flowchart LR
-    TG[Telegram user]
+    TG[Пользователь Telegram]
     BOT[bot<br/>aiogram polling]
     WEB[web<br/>Django DRF]
-    NGINX[nginx<br/>external HTTP :9001]
+    NGINX[nginx<br/>внешний HTTP :9001]
     DB[(Postgres<br/>pg_trgm + pgvector)]
     REDIS[(Redis)]
     CELERY[celery worker]
@@ -24,7 +24,7 @@ flowchart LR
     NGINX --> WEB
     WEB <--> DB
     WEB <--> XAI
-    WEB -. optional /embed, /rerank .-> ML
+    WEB -. опционально /embed, /rerank .-> ML
     WEB --> REDIS
     BOT --> REDIS
     CELERY --> REDIS
@@ -32,96 +32,96 @@ flowchart LR
     BEAT --> REDIS
 ```
 
-## Request Pipeline
+## Pipeline запроса
 
 ```mermaid
 flowchart TD
-    A[Telegram message] --> B[bot.main handle]
-    B --> C{User already has<br/>in-flight request?}
-    C -->|yes| C1[Send busy notice]
-    C -->|no| D[Build request_id and POST /api/chat/]
+    A[Сообщение в Telegram] --> B[bot.main handle]
+    B --> C{У пользователя уже есть<br/>запрос в обработке?}
+    C -->|да| C1[Отправить сообщение о занятости]
+    C -->|нет| D[Собрать request_id и POST /api/chat/]
 
     D --> E[views.chat]
-    E --> F[Upsert TelegramUser]
+    E --> F[Создать или обновить TelegramUser]
     F --> G[pipeline.answer_user_message]
-    G --> H[Save inbound ChatMessage]
-    H --> I[Load recent history]
+    G --> H[Сохранить входящий ChatMessage]
+    H --> I[Загрузить недавнюю историю]
     I --> J[classify_message]
 
     J --> J1[domain_rules classifier]
-    J1 --> J2{Greeting or no LLM?}
-    J2 -->|yes| K[rule result]
-    J2 -->|no| J3[xAI classifier JSON]
+    J1 --> J2{Приветствие<br/>или LLM недоступна?}
+    J2 -->|да| K[Результат правил]
+    J2 -->|нет| J3[xAI classifier JSON]
     J3 --> K
 
     K --> L{need_search?}
-    L -->|no| M[direct_answer]
-    L -->|yes| N{Classifier class kind}
+    L -->|нет| M[direct_answer]
+    L -->|да| N{Тип класса классификатора}
 
-    N -->|product| P[Product branch]
-    N -->|color_selection| Q[Color selection service]
-    N -->|source/system| R[Source RAG branch]
+    N -->|product| P[Продуктовая ветка]
+    N -->|color_selection| Q[Сервис подбора цвета]
+    N -->|source/system| R[Source RAG ветка]
 
     R --> R1[search.class_source_search]
-    R1 --> R2[Select active Source rows<br/>for class_slug]
-    R2 --> R3{Candidates found?}
-    R3 -->|yes| R4[grounded_answer with source context]
-    R3 -->|no| R5[Not enough info response]
+    R1 --> R2[Выбрать активные Source<br/>для class_slug]
+    R2 --> R3{Кандидаты найдены?}
+    R3 -->|да| R4[grounded_answer по найденному контексту]
+    R3 -->|нет| R5[Ответ: недостаточно информации]
 
     P --> P1[answer_product_message]
-    P1 --> P2[Build ProductPlan]
+    P1 --> P2[Собрать ProductPlan]
     P2 --> P3[hybrid_product_search]
-    P3 --> P4[Tool-style product answer]
+    P3 --> P4[Ответ продуктового инструмента]
 
     Q --> Q1[answer_color_selection_message]
 
-    M --> S[Save assistant ChatMessage]
+    M --> S[Сохранить assistant ChatMessage]
     R4 --> S
     R5 --> S
     P4 --> S
     Q1 --> S
-    S --> T[Return answer to bot]
-    T --> U[Send Telegram response]
+    S --> T[Вернуть ответ в bot]
+    T --> U[Отправить ответ в Telegram]
 ```
 
-## Product Hybrid Search
+## Гибридный поиск по товарам
 
 ```mermaid
 flowchart TD
-    A[Product query] --> B[Build ProductPlan]
-    B --> C{Exact SKU lookup?}
-    C -->|hit| D[Return exact products]
-    C -->|miss or no SKU| E[Lexical product search]
-    E --> F[Trigram product search]
-    F --> G[Optional vector search]
+    A[Запрос по товарам] --> B[Собрать ProductPlan]
+    B --> C{Точный поиск по SKU?}
+    C -->|найдено| D[Вернуть точные товары]
+    C -->|не найдено или нет SKU| E[Лексический поиск товаров]
+    E --> F[Trigram поиск товаров]
+    F --> G[Опциональный векторный поиск]
     G --> G1[POST ml-api /embed]
     G1 --> G2[ORDER BY vector distance]
-    G2 --> H[Merge and de-duplicate]
-    H --> I[Sort by product_score]
-    I --> J[Optional rerank]
+    G2 --> H[Объединить и убрать дубли]
+    H --> I[Отсортировать по product_score]
+    I --> J[Опциональный rerank]
     J --> J1[POST ml-api /rerank]
-    J1 --> K[Top products]
-    K --> L[Answer product intent]
+    J1 --> K[Лучшие товары]
+    K --> L[Ответить на продуктовый intent]
 ```
 
-## Current Implementation Notes
+## Заметки по текущей реализации
 
-- The public Telegram path is `bot.main` -> `POST /api/chat/` -> `views.chat` ->
+- Публичный Telegram-путь: `bot.main` -> `POST /api/chat/` -> `views.chat` ->
   `pipeline.answer_user_message`.
-- The classifier first runs local domain rules. If the message is not a simple
-  bypass case and `XAI_API_KEY` is configured, it asks the xAI chat model for a
-  JSON classification.
-- Source knowledge-base answers use `ClassifierClass` and active `Source` rows.
-  `search.search()` currently routes non-product searches to
+- Классификатор сначала запускает локальные domain rules. Если сообщение не
+  является простым bypass-сценарием и задан `XAI_API_KEY`, он запрашивает у xAI
+  JSON-классификацию.
+- Ответы по обычной базе знаний используют `ClassifierClass` и активные строки
+  `Source`. Сейчас `search.search()` направляет не-продуктовые запросы в
   `class_source_search()`.
-- `quick_phrase_search()` exists in `backend/app/core/search.py`, but the current
-  `search()` function does not call it.
-- Source/article embeddings are disabled in the current core search path:
-  `removed_embedding_status()` returns `status="removed"`, and
-  `POST /api/index/prepare/` returns `{"status": "skipped",
+- `quick_phrase_search()` есть в `backend/app/core/search.py`, но текущая
+  функция `search()` его не вызывает.
+- Embeddings для source/article в текущем core search отключены:
+  `removed_embedding_status()` возвращает `status="removed"`, а
+  `POST /api/index/prepare/` возвращает `{"status": "skipped",
   "reason": "embeddings_removed"}`.
-- Product retrieval is separate from source RAG. It can use exact SKU lookup,
-  lexical search, trigram search, optional pgvector search through `ml-api
-  /embed`, and optional reranking through `ml-api /rerank`.
-- Postgres is both the application database and the retrieval store. Redis is
-  used for Celery and bot-side user locks.
+- Поиск по товарам отделен от обычного source RAG. Он может использовать
+  точный поиск по SKU, lexical search, trigram search, опциональный pgvector
+  search через `ml-api /embed` и опциональный rerank через `ml-api /rerank`.
+- Postgres используется и как основная база приложения, и как retrieval store.
+  Redis используется для Celery и пользовательских lock-ов в боте.
