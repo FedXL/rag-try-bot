@@ -4,6 +4,8 @@
 
 ## Архитектура
 
+Актуальная схема RAG-пайплайна: [docs/rag-architecture.md](docs/rag-architecture.md).
+
 - `bot` - aiogram polling-бот. Принимает сообщения Telegram и отправляет их во внутренний Django API.
 - `web` - Django/DRF backend и Django Admin.
 - `nginx` - внешняя точка входа на порт `9001`, проксирует Django и раздает `/static/`.
